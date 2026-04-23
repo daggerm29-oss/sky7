@@ -1,0 +1,38 @@
+The Strategic Theater Focus mode is functioning, but the 3D visual scaling and atmospheric styling are incorrect. The map horizon is glowing white, washing out the dark theme, and the satellites are rendering too close to the surface (they look like they are in the atmosphere with the airplanes). 
+
+Please implement the following visual fixes:
+
+1. Dark Atmosphere (Fixing the White Haze):
+- Override the map's default atmospheric scattering. 
+- If using MapLibre, configure the fog property so that color, high-color, and space-color are set to deep, dark space colors (e.g., #020408 or #000000) instead of white/light blue. 
+- Ensure the transition from the dark matter map to the starry background is seamless and dark.
+
+2. Exaggerated Orbital Altitude (Z-Axis Scaling):
+- The satellites are currently hugging the Earth. You must dramatically exaggerate their 3D altitude so they float high up in the black space background.
+- Multiply the calculated satellite altitude by a massive visual scaling factor (e.g., visualAltitude = realAltitude * 15). 
+- Ensure that LEO satellites are distinctly floating in space, and GEO satellites are pushed even further out.
+
+3. True 3D Sensor Lines:
+- Ensure the GeoJSON coordinates for the satellites use the 3D array format: [longitude, latitude, highly_scaled_altitude_in_meters].
+- The sensor lines must be 3D line-string geometries where the start point is the high-altitude satellite [lng, lat, high_alt], and the end point is the ground target [lng, lat, 0]. 
+- This will stretch the lines vertically through space, creating that distinct "God's Eye" web effect from the reference UI.
+
+And The "THEATER OF OPERATIONS" dropdown is currently hardcoded to a limited list of countries. I need to replace this with a dynamic, free-text "Global Search" input so the user can type and locate ANY place in the world.
+
+Please update the React code with the following implementation:
+
+1. Dynamic Search Input (Autocomplete):
+- Replace the static <select> element with a styled text <input> (maintain the dark, glowing tactical UI, yellow borders, etc.).
+- Implement a debounced search function (e.g., 500ms delay) that triggers as the user types.
+- Query the free Nominatim API: https://nominatim.openstreetmap.org/search?q={searchInput}&format=json&polygon_geojson=1&limit=5
+- Display the top 5 results in a custom, absolute-positioned dropdown menu directly below the input. Show the display_name of the location so the user knows exactly what they are clicking.
+
+2. On-Selection Logic:
+- When the user clicks one of the search results from the dropdown, clear/close the dropdown.
+- Extract the geojson from that specific selected result.
+- Draw the tactical yellow GeoJSON boundary on the 3D globe just like before.
+- Calculate the centroid of that GeoJSON (or use the lat/lon provided in the Nominatim result) and execute the forced "God's Eye" Cinematic Camera Tilt (70+ degree pitch, scaled altitude) focusing on that location.
+
+3. Clear/Reset Feature:
+- Add a small [x] or [CLR] button inside or next to the search bar.
+- When clicked, it should clear the input, remove the yellow tactical boundary from the map, and reset the camera to the default global view.

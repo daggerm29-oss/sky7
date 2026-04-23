@@ -1,0 +1,35 @@
+Here are some more new strict technical requirements:
+
+1. Camera Pitch/Tilt Unlocking:
+- Currently, I cannot tilt the camera to look *across* the horizon like a true orbital view. 
+- Fix the camera controls for the 3D globe view. If using react-globe.gl / Three.js, modify the OrbitControls to remove or increase the maxPolarAngle limit. If using MapLibre 3D globe, set maxPitch to 85+. The user must be able to tilt the camera to view the satellites suspended high above the horizon.
+
+2. Live Satellite Data Engine:
+- Install the satellite.js library.
+- Fetch live satellite TLE (Two-Line Element) data from a public source (e.g., Celestrak active satellites or a hardcoded subset of popular assets like Starlink, ISS, GPS, and known military/reconnaissance satellites to avoid CORS issues).
+- Categorize them into three groups: 
+  A) Communications (e.g., Cyan color)
+  B) Military/Reconnaissance (e.g., Orange/Red color)
+  C) Earth Observation / GEO (e.g., Purple color)
+
+3. 3D Rendering (Altitude & Icons):
+- Only render satellites when the user toggles a new "SATELLITE INTEL" button in the left panel, and ONLY when in the 3D Orbital View.
+- Render them using custom SVG icons distinct from the aircraft.
+- Position them at mathematically correct (but visually scaled) altitudes relative to the globe. (LEO satellites should be visibly lower than GEO satellites).
+
+4. Interaction & Orbital Trajectory (The "God's Eye" View):
+- When a user clicks a satellite, display its details (Name, Type, Altitude, Velocity, Norad ID) in the left panel.
+- Trajectory Ring: Use satellite.js to calculate its future orbital path for the next 100 minutes. Render this path as a glowing 3D line/arc wrapped around the globe.
+- GEO Exception: If the satellite is Geostationary (GEO), DO NOT draw an orbital path, as its relative position to Earth remains static.
+- Sensor Lines: When a satellite is clicked, draw faint, semi-transparent lines projecting from the satellite directly down to its current nadir (the point on the Earth's surface directly below it) to simulate "Areas of Interest" or sensor coverage, matching advanced GEOINT UIs.
+
+Regarding the live satellite data engine for the 3D Orbital View, please ensure you are fetching the TLE data from the following specific OSINT plain-text sources, as classified assets are not available in standard APIs:
+
+1. Fetch the raw .txt TLE files using a CORS proxy if necessary.
+2. For Earth Observation & Communications (Civilian): Use the standard CelesTrak feeds.
+   - Resource: https://celestrak.org/NORAD/elements/gp.php?GROUP=active&FORMAT=tle
+3. For Military/Spy/Reconnaissance: You must fetch from amateur OSINT tracking lists that monitor classified payloads, or the CelesTrak military subset.
+   - Primary Military/Recon Resource: https://celestrak.org/NORAD/elements/gp.php?GROUP=military&FORMAT=tle
+   - If you can implement a fetch from the famous OSINT "classfd.tle" list (often mirrored on GitHub for CORS access), use that specifically for the Spy category.
+
+Parse these raw text files using satellite.js. Ensure the UI explicitly labels the Military/Spy assets with a red/orange color code to distinguish them from public civilian infrastructure.

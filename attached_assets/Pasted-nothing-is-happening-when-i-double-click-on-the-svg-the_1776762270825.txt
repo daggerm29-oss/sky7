@@ -1,0 +1,725 @@
+nothing is happening, when i double click on the svg the selected svg is disappearing, can i send you the code of my freinds project how he implemented? you can get a idea and do only the double click view the same
+
+
+here the code
+
+import React, { useEffect, useRef, useState } from 'react';
+import * as satellite from 'satellite.js';
+import { useStore } from '@/store/use-store';
+import { useCosmosLayer, useAeroLayer, useNavalLayer } from '@/hooks/use-geoint';
+
+declare const Cesium: any;
+
+export function CesiumMap() {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const viewerRef = useRef<any>(null);
+  const selectedSatRef = useRef<any>(null);
+  
+  // HUD State for Detection Mode
+  const [detectionMode, setDetectionMode] = useState<'OFF' | 'SPARSE' | 'PANOPTIC'>('PANOPTIC');
+  const detectionModeRef = useRef<'OFF' | 'SPARSE' | 'PANOPTIC'>('PANOPTIC');
+  
+  // Track if camera is locked onto an entity
+  const [isTracking, setIsTracking] = useState(false);
+  
+  const dataSourcesRef = useRef<{
+    cosmos?: any;
+    aero?: any;
+    naval?: any;
+  }>({});
+
+  const { layers, tacticalMode, updateTelemetry, setSelectedEntity } = useStore();
+
+  const cosmosQuery = useCosmosLayer(layers.cosmos);
+  const aeroQuery = useAeroLayer(layers.aero);
+  const navalQuery = useNavalLayer(layers.naval);
+
+  // Sync state to ref for Cesium's CallbackProperty and force a re-render
+  useEffect(() => {
+    detectionModeRef.current = detectionMode;
+    if (viewerRef.current) {
+      viewerRef.current.scene.requestRender();
+    }
+  }, [detectionMode]);
+
+  // Initialize Cesium Viewer
+  useEffect(() => {
+    if (!containerRef.current || viewerRef.current || !(window as any).Cesium) return;
+
+    Cesium.Ion.defaultAccessToken = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJqdGkiOiI0YjdkMmFmMS04ZmU2LTQ4NDYtYTIwMS1hOTg5NGM2NzEzNGYiLCJpZCI6Mzk3MjQyLCJpYXQiOjE3NzI1Mzk5NDV9.sQ4V9RmCN2-xnXW2WZDxSAgaZTZFn9pohwFD9YzmWoU';
+
+    const viewer = new Cesium.Viewer(containerRef.current, {
+      animation: true,
+      timeline: false,
+      baseLayerPicker: false,
+      fullscreenButton: false,
+      geocoder: false,
+      homeButton: false,
+      infoBox: false,
+      sceneModePicker: false,
+      selectionIndicator: false,
+      navigationHelpButton: false,
+      requestRenderMode: false,
+    });
+
+    viewer.clock.clockRange = Cesium.ClockRange.UNBOUNDED;
+    viewer.clock.shouldAnimate = true;
+    
+    // Enable smooth touchpad / trackpad zoom
+    viewer.scene.screenSpaceCameraController.enableZoom = true;
+    viewer.scene.screenSpaceCameraController.enableTilt = true;
+    viewer.scene.screenSpaceCameraController.enableLook = true;
+
+    // Make trackpad zoom feel smoother and less jumpy
+    viewer.scene.screenSpaceCameraController.inertiaZoom = 0.85;
+    viewer.scene.screenSpaceCameraController.zoomEventTypes = [
+      Cesium.CameraEventType.WHEEL,
+      Cesium.CameraEventType.PINCH,
+      {
+        eventType: Cesium.CameraEventType.RIGHT_DRAG,
+        modifier: Cesium.KeyboardEventModifier.CTRL,
+      },
+    ];
+
+    viewer.scene.highDynamicRange = true;
+    viewer.scene.fog.enabled = true;
+    viewer.scene.fog.density = 0.0001;
+    viewer.scene.globe.enableLighting = true;
+    viewer.scene.globe.depthTestAgainstTerrain = true; 
+
+    // Listen for when an entity is tracked/untracked
+    viewer.trackedEntityChanged.addEventListener((entity: any) => {
+      setIsTracking(!!entity);
+    });
+
+    // Prevent the browser from intercepting trackpad pinch-to-zoom gestures
+    const handleWheel = (e: WheelEvent) => {
+      if (e.ctrlKey) {
+        e.preventDefault();
+      }
+    };
+    
+    const containerElement = containerRef.current;
+    if (containerElement) {
+      containerElement.addEventListener('wheel', handleWheel, { passive: false });
+    }
+
+    const setupTiles = async () => {
+      try {
+        const tileset = await Cesium.createGooglePhotorealistic3DTileset();
+        viewer.scene.primitives.add(tileset);
+      } catch (error) {
+        console.warn("Google Tiles failed", error);
+      }
+    };
+    setupTiles();
+
+    dataSourcesRef.current = {
+      cosmos: new Cesium.CustomDataSource('cosmos'),
+      aero: new Cesium.CustomDataSource('aero'),
+      naval: new Cesium.CustomDataSource('naval')
+    };
+
+    viewer.dataSources.add(dataSourcesRef.current.cosmos);
+    viewer.dataSources.add(dataSourcesRef.current.aero);
+    viewer.dataSources.add(dataSourcesRef.current.naval);
+
+    viewer.camera.changed.addEventListener(() => {
+      const pos = viewer.camera.positionCartographic;
+      updateTelemetry({
+        lat: Cesium.Math.toDegrees(pos.latitude),
+        lng: Cesium.Math.toDegrees(pos.longitude),
+        alt: pos.height,
+        heading: Cesium.Math.toDegrees(viewer.camera.heading),
+        pitch: Cesium.Math.toDegrees(viewer.camera.pitch)
+      });
+    });
+
+    const handler = new Cesium.ScreenSpaceEventHandler(viewer.scene.canvas);
+    
+    handler.setInputAction((movement: any) => {
+      const pickedObject = viewer.scene.pick(movement.position);
+      
+      if (Cesium.defined(pickedObject) && pickedObject.id) {
+        const entity = pickedObject.id;
+        
+        if (selectedSatRef.current && selectedSatRef.current !== entity) {
+            if (selectedSatRef.current.path) selectedSatRef.current.path.show = false;
+        }
+        
+        if (entity.properties?.type?.getValue() === 'COSMOS') {
+            if (entity.path) entity.path.show = true;
+            selectedSatRef.current = entity;
+        } else {
+            selectedSatRef.current = null;
+        }
+
+        setSelectedEntity({
+          id: entity.id,
+          type: entity.properties?.type?.getValue(),
+          title: entity.properties?.title?.getValue(),
+          subtitle: entity.properties?.subtitle?.getValue(),
+          velocity: entity.properties?.velocity?.getValue(),
+          altitude: entity.properties?.altitude?.getValue(),
+          origin: entity.properties?.origin?.getValue(),
+          lat: entity.properties?.lat?.getValue(),
+          lng: entity.properties?.lng?.getValue(),
+          // Pass military status to the UI store for the datasheet
+          raw: {
+            isMilitary: entity.properties?.isMilitary?.getValue()
+          }
+        });
+      } else {
+        if (selectedSatRef.current && selectedSatRef.current.path) {
+            selectedSatRef.current.path.show = false;
+        }
+        selectedSatRef.current = null;
+        setSelectedEntity(null);
+      }
+    }, Cesium.ScreenSpaceEventType.LEFT_CLICK);
+
+    handler.setInputAction((movement: any) => {
+      const pickedObject = viewer.scene.pick(movement.position);
+      if (Cesium.defined(pickedObject) && pickedObject.id) {
+        viewer.trackedEntity = pickedObject.id;
+      } else {
+        viewer.trackedEntity = undefined;
+      }
+    }, Cesium.ScreenSpaceEventType.LEFT_DOUBLE_CLICK);
+
+    viewer.camera.setView({
+      destination: Cesium.Cartesian3.fromDegrees(78.9629, 20.5937, 8000000.0)
+    });
+
+    viewerRef.current = viewer;
+
+    return () => {
+      if (containerElement) {
+        containerElement.removeEventListener('wheel', handleWheel);
+      }
+      viewer.destroy();
+      viewerRef.current = null;
+    };
+  },[]);
+
+  const createDynamicSurfaceOrientation = (
+    sampledPos: any,
+    pitchOffset: number = 0,
+    rollOffset: number = 0,
+    headingOffset: number = 0
+  ) => {
+    return new Cesium.CallbackProperty((time: any) => {
+      const position = sampledPos.getValue(time);
+      if (!position) return undefined;
+      const futureTime = Cesium.JulianDate.addSeconds(time, 5, new Cesium.JulianDate());
+      const futurePosition = sampledPos.getValue(futureTime);
+      let headingRad = 0;
+      if (futurePosition) {
+        const carto1 = Cesium.Cartographic.fromCartesian(position);
+        const carto2 = Cesium.Cartographic.fromCartesian(futurePosition);
+        
+        const dLon = carto2.longitude - carto1.longitude;
+        const dLat = carto2.latitude - carto1.latitude;
+        
+        const x = dLon * Math.cos(carto1.latitude);
+        
+        headingRad = Math.atan2(x, dLat);
+        if (headingRad < 0) headingRad += 2 * Math.PI;
+      }
+      const hpr = new Cesium.HeadingPitchRoll(headingRad + headingOffset, pitchOffset, rollOffset);
+      return Cesium.Transforms.headingPitchRollQuaternion(position, hpr);
+    }, false);
+  };
+
+  const addDirectionArrow = (
+    ds: any,
+    arrowId: string,
+    sampledPos: any,
+    altOffset: number = 200,
+    arrowLenM: number = 80000,
+    arrowColor: string = '#00ff9f'
+  ) => {
+    const positionsCallback = new Cesium.CallbackProperty((time: any) => {
+      const pos = sampledPos.getValue(time);
+      if (!pos) return [];
+
+      const futureTime = Cesium.JulianDate.addSeconds(time, 10, new Cesium.JulianDate());
+      const futurePos = sampledPos.getValue(futureTime);
+      if (!futurePos) return [pos];
+
+      const transform = Cesium.Transforms.eastNorthUpToFixedFrame(pos);
+
+      const dir = Cesium.Cartesian3.subtract(futurePos, pos, new Cesium.Cartesian3());
+      const dirNorm = Cesium.Cartesian3.normalize(dir, new Cesium.Cartesian3());
+
+      const invTransform = Cesium.Matrix4.inverseTransformation(transform, new Cesium.Matrix4());
+      const localDir = Cesium.Matrix4.multiplyByPointAsVector(invTransform, dirNorm, new Cesium.Cartesian3());
+
+      const en = new Cesium.Cartesian2(localDir.x, localDir.y);
+      const enNorm = Cesium.Cartesian2.normalize(en, new Cesium.Cartesian2());
+      const ex = enNorm.x;
+      const ey = enNorm.y;
+
+      const carto = Cesium.Cartographic.fromCartesian(pos);
+      const arrowAlt = carto.height + altOffset;
+
+      const toWorld = (eMeters: number, nMeters: number): any => {
+        const localPoint = new Cesium.Cartesian3(eMeters, nMeters, 0);
+        const worldOffset = Cesium.Matrix4.multiplyByPoint(transform, localPoint, new Cesium.Cartesian3());
+        const wCarto = Cesium.Cartographic.fromCartesian(worldOffset);
+        return Cesium.Cartesian3.fromRadians(wCarto.longitude, wCarto.latitude, arrowAlt);
+      };
+
+      const shaft  = arrowLenM;
+      const headL  = arrowLenM * 0.3; 
+      const headW  = arrowLenM * 0.15; 
+
+      const base   = toWorld(0, 0);
+      const tip    = toWorld(ex * shaft, ey * shaft);
+      const neckE  = ex * (shaft - headL);
+      const neckN  = ey * (shaft - headL);
+      const perpE  = -ey;
+      const perpN  =  ex;
+      const leftB  = toWorld(neckE + perpE * headW, neckN + perpN * headW);
+      const rightB = toWorld(neckE - perpE * headW, neckN - perpN * headW);
+
+      return [base, tip, leftB, tip, rightB];
+    }, false);
+
+    const existing = ds.entities.getById(arrowId);
+    if (existing) {
+      existing.polyline.positions = positionsCallback;
+    } else {
+      ds.entities.add({
+        id: arrowId,
+        polyline: {
+          positions: positionsCallback,
+          width: 3, 
+          material: new Cesium.PolylineGlowMaterialProperty({
+            glowPower: 0.3,
+            color: Cesium.Color.fromCssColorString(arrowColor).withAlpha(0.8), 
+          }),
+          clampToGround: false,
+          arcType: Cesium.ArcType.NONE,
+          distanceDisplayCondition: new Cesium.DistanceDisplayCondition(25000, Number.MAX_VALUE)
+        },
+      });
+    }
+  };
+
+  // Update Cosmos Layer (Satellites)
+  useEffect(() => {
+    const ds = dataSourcesRef.current.cosmos;
+    if (!ds || !viewerRef.current) return;
+    if (!layers.cosmos) { ds.entities.removeAll(); return; }
+
+    if (cosmosQuery.data) {
+      ds.entities.suspendEvents();
+      const activeIds = new Set();
+      
+      cosmosQuery.data.slice(0, 500).forEach((sat, index) => {
+        try {
+          const satrec = satellite.twoline2satrec(sat.tleLine1, sat.tleLine2);
+          const sampledPos = new Cesium.SampledPositionProperty();
+          const now = new Date();
+          
+          for (let i = 0; i < 180; i++) {
+            const sampleTime = new Date(now.getTime() + i * 10000);
+            const posAndVel = satellite.propagate(satrec, sampleTime);
+            
+            if (posAndVel.position && typeof posAndVel.position !== 'boolean') {
+              const gmst = satellite.gstime(sampleTime);
+              const posGd = satellite.eciToGeodetic(posAndVel.position as satellite.PositionAndVelocity['position'], gmst);
+              const cartesian = Cesium.Cartesian3.fromRadians(posGd.longitude, posGd.latitude, posGd.height * 1000);
+              sampledPos.addSample(Cesium.JulianDate.fromDate(sampleTime), cartesian);
+            }
+          }
+
+          const id = `sat-${sat.id}`;
+          activeIds.add(id);
+          let entity = ds.entities.getById(id);
+
+          const tacticalColor = Cesium.Color.fromCssColorString('#00ffff'); 
+          const isSparse = index % 3 === 0;
+
+          if (!entity) {
+              entity = ds.entities.add({
+                  id: id,
+                  point: {
+                      pixelSize: 6, 
+                      color: tacticalColor,
+                      outlineColor: Cesium.Color.BLACK,
+                      outlineWidth: 2,
+                      show: new Cesium.CallbackProperty(() => viewerRef.current?.trackedEntity?.id !== id, false),
+                      distanceDisplayCondition: new Cesium.DistanceDisplayCondition(50000, Number.MAX_VALUE),
+                  },
+                  label: {
+                      text: `[ ${sat.name} ]`,
+                      font: 'bold 12px monospace', 
+                      fillColor: tacticalColor,
+                      showBackground: true,
+                      backgroundColor: new Cesium.Color(0.0, 0.0, 0.0, 0.8), 
+                      backgroundPadding: new Cesium.Cartesian2(7, 5),
+                      pixelOffset: new Cesium.Cartesian2(15, 0), 
+                      eyeOffset: new Cesium.Cartesian3(0.0, 0.0, -500000.0), 
+                      horizontalOrigin: Cesium.HorizontalOrigin.LEFT,
+                      distanceDisplayCondition: new Cesium.DistanceDisplayCondition(50000, Number.MAX_VALUE),
+                      show: new Cesium.CallbackProperty(() => {
+                          if (viewerRef.current?.trackedEntity?.id === id) return false;
+                          const mode = detectionModeRef.current;
+                          if (mode === 'OFF') return false;
+                          if (mode === 'SPARSE') return isSparse;
+                          return true;
+                      }, false),
+                  },
+                  model: { 
+                      uri: '/models/satellite.glb', 
+                      minimumPixelSize: 65, 
+                      maximumScale: 50,
+                      show: new Cesium.CallbackProperty(() => viewerRef.current?.trackedEntity?.id === id, false)
+                  },
+                  path: {
+                      show: false, resolution: 120,
+                      material: new Cesium.PolylineGlowMaterialProperty({ glowPower: 0.2, color: Cesium.Color.fromCssColorString('#00ff9f')}),
+                      width: 3, leadTime: 5400, trailTime: 5400
+                  },
+                  properties: new Cesium.PropertyBag()
+              });
+          }
+          
+          entity.position = sampledPos;
+          entity.orientation = createDynamicSurfaceOrientation(sampledPos, 0, 0, 0);
+
+          addDirectionArrow(ds, `arrow-${id}`, sampledPos, 5000, 300000, '#00ffff');
+
+          entity.properties.type = new Cesium.ConstantProperty('COSMOS');
+          entity.properties.title = new Cesium.ConstantProperty(sat.name);
+          entity.properties.subtitle = new Cesium.ConstantProperty(`SAT ID: ${sat.id}`);
+          entity.properties.origin = new Cesium.ConstantProperty('ORBITAL');
+
+        } catch (e) { console.warn('Invalid TLE:', sat.id); }
+      });
+
+      const toRemove = ds.entities.values.filter((e: any) => !activeIds.has(e.id));
+      toRemove.forEach((e: any) => ds.entities.remove(e));
+      ds.entities.resumeEvents();
+    }
+  },[cosmosQuery.data, layers.cosmos]);
+
+  // Update Aero Layer (Flights) - MODIFIED FOR MILITARY SUPPORT
+  useEffect(() => {
+    const ds = dataSourcesRef.current.aero;
+    if (!ds || !viewerRef.current) return;
+    if (!layers.aero) { ds.entities.removeAll(); return; }
+
+    if (aeroQuery.data && aeroQuery.data.length > 0) {
+      ds.entities.suspendEvents();
+      const activeIds = new Set();
+
+      aeroQuery.data.slice(0, 1500).forEach((ac, index) => {
+        if (ac.longitude === null || ac.latitude === null) return;
+        
+        const id = `aero-${ac.icao24}`;
+        activeIds.add(id);
+        activeIds.add(`arrow-${id}`);
+        let entity = ds.entities.getById(id);
+
+        // MILITARY TACTICAL COLORING (Red for Military, Amber for Public)
+        const tacticalColor = ac.isMilitary 
+            ? Cesium.Color.fromCssColorString('#ef4444') 
+            : Cesium.Color.fromCssColorString('#ffcc00');
+            
+        // Add ⚔ icon to military callsings
+        const callsign = (ac.isMilitary ? '⚔ ' : '') + (ac.callsign?.trim() || ac.icao24);
+        const isSparse = index % 4 === 0;
+
+        if (!entity) {
+            entity = ds.entities.add({
+                id: id,
+                point: {
+                    pixelSize: 6,
+                    color: tacticalColor,
+                    outlineColor: Cesium.Color.BLACK,
+                    outlineWidth: 2,
+                    show: new Cesium.CallbackProperty(() => viewerRef.current?.trackedEntity?.id !== id, false),
+                    distanceDisplayCondition: new Cesium.DistanceDisplayCondition(15000, Number.MAX_VALUE)
+                },
+                label: {
+                    text: `[ ${callsign} ]`,
+                    font: 'bold 12px monospace',
+                    fillColor: tacticalColor,
+                    showBackground: true,
+                    backgroundColor: new Cesium.Color(0.0, 0.0, 0.0, 0.8),
+                    backgroundPadding: new Cesium.Cartesian2(7, 5),
+                    pixelOffset: new Cesium.Cartesian2(15, 0),
+                    eyeOffset: new Cesium.Cartesian3(0.0, 0.0, -500000.0), 
+                    horizontalOrigin: Cesium.HorizontalOrigin.LEFT,
+                    distanceDisplayCondition: new Cesium.DistanceDisplayCondition(15000, Number.MAX_VALUE),
+                    show: new Cesium.CallbackProperty(() => {
+                        if (viewerRef.current?.trackedEntity?.id === id) return false;
+                        const mode = detectionModeRef.current;
+                        if (mode === 'OFF') return false;
+                        if (mode === 'SPARSE') return isSparse;
+                        return true;
+                    }, false),
+                },
+                model: { 
+                    // Use fighter model for military aircraft if available
+                    uri: ac.isMilitary ? '/models/fighter.glb' : '/models/plane.glb', 
+                    minimumPixelSize: 55, 
+                    maximumScale: 1000,
+                    show: new Cesium.CallbackProperty(() => viewerRef.current?.trackedEntity?.id === id, false)
+                },
+                properties: new Cesium.PropertyBag()
+            });
+        }
+        
+        const sampledPos = new Cesium.SampledPositionProperty();
+        const now = new Date();
+        const velocity = ac.velocity || 200;
+        const heading = ac.trueTrack || 0;
+
+        for (let i = 0; i < 10; i++) {
+            const sampleTime = new Date(now.getTime() + i * 10000);
+            const timeOffsetSeconds = i * 10;
+            const distanceDegrees = (velocity * timeOffsetSeconds) / 111320;
+            
+            const headingRad = Cesium.Math.toRadians(heading);
+            const newLat = ac.latitude + (distanceDegrees * Math.cos(headingRad));
+            const newLon = ac.longitude + (distanceDegrees * Math.sin(headingRad) / Math.cos(Cesium.Math.toRadians(ac.latitude)));
+            const newAlt = ac.baroAltitude || 10000;
+            
+            sampledPos.addSample(Cesium.JulianDate.fromDate(sampleTime), Cesium.Cartesian3.fromDegrees(newLon, newLat, newAlt));
+        }
+        entity.position = sampledPos;
+
+        const trueHeadingRad = Cesium.Math.toRadians(heading);
+        entity.orientation = new Cesium.CallbackProperty((time: any) => {
+          const position = sampledPos.getValue(time);
+          if (!position) return undefined;
+          // Rotation adjustments for model orientation
+          const hpr = new Cesium.HeadingPitchRoll(trueHeadingRad + (-3.1416), 1.5533, 1.6057);
+          return Cesium.Transforms.headingPitchRollQuaternion(position, hpr);
+        }, false);
+
+        addDirectionArrow(ds, `arrow-${id}`, sampledPos, 200, 60000, ac.isMilitary ? '#ef4444' : '#ffcc00');
+
+        entity.properties.type = new Cesium.ConstantProperty('AERO');
+        entity.properties.title = new Cesium.ConstantProperty(ac.callsign?.trim() || 'UNKNOWN');
+        entity.properties.subtitle = new Cesium.ConstantProperty(`${ac.icao24} ${ac.isMilitary ? '[MIL]' : ''}`);
+        entity.properties.velocity = new Cesium.ConstantProperty(ac.velocity ? `${Math.round(ac.velocity * 1.94384)} kts` : '---');
+        entity.properties.altitude = new Cesium.ConstantProperty(`${Math.round((ac.baroAltitude || 0) * 3.28084)} ft`);
+        entity.properties.origin = new Cesium.ConstantProperty(ac.originCountry || 'UNKNOWN');
+        entity.properties.lat = new Cesium.ConstantProperty(ac.latitude);
+        entity.properties.lng = new Cesium.ConstantProperty(ac.longitude);
+        entity.properties.isMilitary = new Cesium.ConstantProperty(ac.isMilitary);
+      });
+
+      const toRemove = ds.entities.values.filter((e: any) => !activeIds.has(e.id));
+      toRemove.forEach((e: any) => ds.entities.remove(e));
+      ds.entities.resumeEvents();
+    }
+  }, [aeroQuery.data, layers.aero]);
+
+  // Update Naval Layer (Ships)
+  useEffect(() => {
+    const ds = dataSourcesRef.current.naval;
+    if (!ds || !viewerRef.current) return;
+    if (!layers.naval) { ds.entities.removeAll(); return; }
+
+    if (navalQuery.data && navalQuery.data.length > 0) {
+      ds.entities.suspendEvents();
+      const activeIds = new Set();
+
+      navalQuery.data.slice(0, 500).forEach((v, index) => {
+        const id = `naval-${v.mmsi}`;
+        activeIds.add(id);
+        activeIds.add(`arrow-${id}`);
+        let entity = ds.entities.getById(id);
+
+        const tacticalColor = Cesium.Color.fromCssColorString('#0088ff'); // Tactical Blue
+        const vesselName = v.name?.trim() || `MMSI:${v.mmsi}`;
+        const isSparse = index % 3 === 0;
+
+        if (!entity) {
+            entity = ds.entities.add({
+                id: id,
+                point: {
+                    pixelSize: 6,
+                    color: tacticalColor,
+                    outlineColor: Cesium.Color.BLACK,
+                    outlineWidth: 2,
+                    show: new Cesium.CallbackProperty(() => viewerRef.current?.trackedEntity?.id !== id, false),
+                    distanceDisplayCondition: new Cesium.DistanceDisplayCondition(10000, Number.MAX_VALUE)
+                },
+                label: {
+                    text: `[ ${vesselName} ]`,
+                    font: 'bold 12px monospace',
+                    fillColor: tacticalColor,
+                    showBackground: true,
+                    backgroundColor: new Cesium.Color(0.0, 0.0, 0.0, 0.8),
+                    backgroundPadding: new Cesium.Cartesian2(7, 5),
+                    pixelOffset: new Cesium.Cartesian2(15, 0),
+                    eyeOffset: new Cesium.Cartesian3(0.0, 0.0, -500000.0), 
+                    horizontalOrigin: Cesium.HorizontalOrigin.LEFT,
+                    distanceDisplayCondition: new Cesium.DistanceDisplayCondition(10000, Number.MAX_VALUE),
+                    show: new Cesium.CallbackProperty(() => {
+                        if (viewerRef.current?.trackedEntity?.id === id) return false;
+                        const mode = detectionModeRef.current;
+                        if (mode === 'OFF') return false;
+                        if (mode === 'SPARSE') return isSparse;
+                        return true;
+                    }, false),
+                },
+                model: { 
+                    uri: '/models/ship.glb', 
+                    minimumPixelSize: 50, 
+                    maximumScale: 500,
+                    show: new Cesium.CallbackProperty(() => viewerRef.current?.trackedEntity?.id === id, false)
+                },
+                properties: new Cesium.PropertyBag()
+            });
+        }
+
+        const sampledPos = new Cesium.SampledPositionProperty();
+        const now = new Date();
+        const velocity = (v.speed || 10) * 0.514444; 
+        const heading = v.course || v.heading || 0;
+
+        for (let i = 0; i < 10; i++) {
+            const sampleTime = new Date(now.getTime() + i * 10000);
+            const timeOffsetSeconds = i * 10;
+            const distanceDegrees = (velocity * timeOffsetSeconds) / 111320;
+            
+            const headingRad = Cesium.Math.toRadians(heading);
+            const newLat = v.latitude + (distanceDegrees * Math.cos(headingRad));
+            const newLon = v.longitude + (distanceDegrees * Math.sin(headingRad));
+            
+            sampledPos.addSample(Cesium.JulianDate.fromDate(sampleTime), Cesium.Cartesian3.fromDegrees(newLon, newLat, 0));
+        }
+        entity.position = sampledPos;
+        entity.orientation = createDynamicSurfaceOrientation(sampledPos, 0, 0, 0);
+
+        addDirectionArrow(ds, `arrow-${id}`, sampledPos, 50, 20000, '#0088ff');
+        
+        entity.properties.type = new Cesium.ConstantProperty('NAVAL');
+        entity.properties.title = new Cesium.ConstantProperty(v.name?.trim() || 'VESSEL');
+        entity.properties.subtitle = new Cesium.ConstantProperty(`${v.mmsi}`);
+        entity.properties.velocity = new Cesium.ConstantProperty(v.speed ? `${Math.round(v.speed)} kts` : '---');
+        entity.properties.altitude = new Cesium.ConstantProperty('SEA LEVEL');
+        entity.properties.lat = new Cesium.ConstantProperty(v.latitude);
+        entity.properties.lng = new Cesium.ConstantProperty(v.longitude);
+      });
+
+      const toRemove = ds.entities.values.filter((e: any) => !activeIds.has(e.id));
+      toRemove.forEach((e: any) => ds.entities.remove(e));
+      ds.entities.resumeEvents();
+    }
+  },[navalQuery.data, layers.naval]);
+
+  // ON-SCREEN ZOOM FUNCTIONS
+  const handleZoomIn = () => {
+    if (viewerRef.current) {
+      const height = viewerRef.current.camera.positionCartographic.height;
+      viewerRef.current.camera.zoomIn(height * 0.3);
+    }
+  };
+
+  const handleZoomOut = () => {
+    if (viewerRef.current) {
+      const height = viewerRef.current.camera.positionCartographic.height;
+      viewerRef.current.camera.zoomOut(height * 0.3);
+    }
+  };
+
+  // RELEASE LOCK FUNCTION - Fly back to original starting coordinates
+  const handleReleaseLock = () => {
+    if (viewerRef.current) {
+      // 1. Break the lock
+      viewerRef.current.trackedEntity = undefined;
+      
+      // 2. Clear selected state safely
+      if (selectedSatRef.current && selectedSatRef.current.path) {
+          selectedSatRef.current.path.show = false;
+      }
+      selectedSatRef.current = null;
+      setSelectedEntity(null);
+
+      // 3. Cinematic fly back to the original starting altitude and coordinates
+      viewerRef.current.camera.flyTo({
+        destination: Cesium.Cartesian3.fromDegrees(78.9629, 20.5937, 8000000.0),
+        duration: 2.0 // 2 seconds animation duration
+      });
+    }
+  };
+
+  const getFilterClass = () => {
+    switch (tacticalMode) {
+      case 'NVG': return 'map-filter-nvg';
+      case 'FLIR': return 'map-filter-flir';
+      case 'NOIR': return 'map-filter-noir';
+      default: return 'map-filter-normal';
+    }
+  };
+
+  return (
+    <div className="absolute inset-0 bg-black">
+      <div 
+        ref={containerRef} 
+        className={`w-full h-full transition-all duration-700 ease-in-out ${getFilterClass()}`}
+      />
+
+      {/* RELEASE LOCK BUTTON (Appears only when tracking) */}
+      {isTracking && (
+        <div className="absolute top-24 left-1/2 transform -translate-x-1/2 z-50 pointer-events-auto">
+          <button
+            onClick={handleReleaseLock}
+            className="px-5 py-2 border border-[#00ff9f]/50 bg-black/80 text-[#00ff9f] font-mono text-[12px] tracking-widest hover:bg-[#00ff9f]/20 hover:border-[#00ff9f] shadow-[0_0_15px_rgba(0,255,159,0.2)] transition-all flex items-center gap-3 backdrop-blur-sm"
+          >
+            <span className="animate-pulse text-red-500">●</span> 
+            [ RELEASE TARGET LOCK ]
+          </button>
+        </div>
+      )}
+
+      {/* ON-SCREEN ZOOM CONTROLS */}
+      <div className="absolute right-6 bottom-[220px] z-50 flex flex-col gap-2 font-mono text-[16px] pointer-events-auto">
+        <button
+          onClick={handleZoomIn}
+          className="w-10 h-10 border border-[#00ff9f]/40 bg-black/60 text-[#00ff9f] hover:bg-[#00ff9f]/20 hover:border-[#00ff9f] shadow-[0_0_10px_rgba(0,255,159,0.1)] flex items-center justify-center backdrop-blur-sm transition-all"
+        >
+          +
+        </button>
+        <button
+          onClick={handleZoomOut}
+          className="w-10 h-10 border border-[#00ff9f]/40 bg-black/60 text-[#00ff9f] hover:bg-[#00ff9f]/20 hover:border-[#00ff9f] shadow-[0_0_10px_rgba(0,255,159,0.1)] flex items-center justify-center backdrop-blur-sm transition-all"
+        >
+          -
+        </button>
+      </div>
+      
+      {/* HUD DETECTION MODE TOGGLE */}
+      <div className="absolute right-6 bottom-24 z-50 flex flex-col gap-2 font-mono text-[11px] tracking-wider pointer-events-auto">
+        <div className="text-[#00ff9f] mb-1 opacity-80 border-b border-[#00ff9f]/30 pb-1">HUD TARGETING</div>
+        {['OFF', 'SPARSE', 'PANOPTIC'].map((mode) => (
+          <button
+            key={mode}
+            onClick={() => setDetectionMode(mode as any)}
+            className={`px-4 py-1.5 border backdrop-blur-sm transition-all text-left w-32 ${
+              detectionMode === mode 
+                ? 'border-[#00ff9f] bg-[#00ff9f]/10 text-[#00ff9f] shadow-[0_0_10px_rgba(0,255,159,0.2)]' 
+                : 'border-[#00ff9f]/20 bg-black/60 text-[#00ff9f]/50 hover:bg-[#00ff9f]/5 hover:border-[#00ff9f]/50'
+            }`}
+          >
+            <span className="inline-block w-4">{detectionMode === mode ? '■' : '□'}</span> {mode}
+          </button>
+        ))}
+      </div>
+
+      <style>{`
+        .cesium-viewer-bottom { display: none !important; }
+        .cesium-widget-credits { display: none !important; }
+      `}</style>
+    </div>
+  );
+}

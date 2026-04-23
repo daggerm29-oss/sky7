@@ -1,0 +1,20 @@
+Here are the new strict technical requirements:
+
+1. Region Selection & Dynamic Boundaries:
+- Add a high-tech dropdown or search input in the left panel labeled "THEATER OF OPERATIONS" (e.g., Israel, Iran, Taiwan, India, Ukraine, Strait of Hormuz).
+- When a region is selected, fetch its geographic boundary (GeoJSON) using the free Nominatim API (e.g., https://nominatim.openstreetmap.org/search?q={region}&polygon_geojson=1&format=json).
+- Parse the resulting polygon and draw it onto the 3D globe as a glowing, tactical yellow boundary line (Color: #FFD700, with a slight opacity/glow effect). Ensure the fill is either completely transparent or extremely faint (e.g., 5% opacity yellow) so the dark map remains visible.
+
+2. Forced "God's Eye" Cinematic Camera Tilt (CRITICAL):
+- Calculate the centroid (bounding box center) of the fetched GeoJSON.
+- Smoothly transition the camera to focus on this centroid.
+- Override the default camera limits to force a severe, cinematic pitch. The camera must look *across* the horizon at roughly a 70 to 80-degree angle, suspended high enough in the exosphere so that live ADS-B flights are visible on the surface below, and the LEO/MEO satellites are visible floating in the space above. 
+- (Implementation note: If using MapLibre's globe, use flyTo({ center: [lng, lat], pitch: 75, zoom: 4 }). If using react-globe.gl, mathematically position the Three.js camera at a high altitude offset from the target coordinate and call controls.maxPolarAngle = Math.PI / 2 to allow horizon viewing).
+
+3. Satellite Sensor Footprint (Area of Interest Projection):
+- When the user clicks on a satellite while in this view, calculate its Nadir (the coordinate exactly 90-degrees straight down on the Earth's surface) using our existing satellite.js integration.
+- Draw a 3D visual representation of its sensor coverage: Render a semi-transparent tactical cone, or a web of 4-8 distinct lines, projecting from the satellite's exact altitude down to a radius around the Nadir on the ground. 
+- Color code this projection line based on the satellite's classification (e.g., Red for Military/Recon).
+
+
+Look at the reference image how the angle of the view and the are aod intrest lines of sattilites should look like

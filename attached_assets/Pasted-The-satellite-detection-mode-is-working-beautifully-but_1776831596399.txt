@@ -1,0 +1,48 @@
+The satellite detection mode is working beautifully, butCurrently, we are missing a vast majority of global military, intelligence, and dual-use assets because they are hidden under obscure names and categorized under civilian-sounding TLE lists.
+
+Please refactor the satellite fetching and classification logic with the following strict requirements:
+
+1. Comprehensive TLE Intake:
+Fetch and merge live TLE data from the following CelesTrak endpoints to ensure maximum coverage of disguised assets. Deduplicate any satellites that appear in multiple lists by their NORAD catalog number.
+- https://celestrak.org/NORAD/elements/gp.php?GROUP=military&FORMAT=tle
+- https://celestrak.org/NORAD/elements/gp.php?GROUP=resource&FORMAT=tle
+- https://celestrak.org/NORAD/elements/gp.php?GROUP=radar&FORMAT=tle
+- https://celestrak.org/NORAD/elements/gp.php?GROUP=navigation&FORMAT=tle
+
+2. The Global OSINT Dictionary (Regex/Mapping):
+Create a scalable JavaScript classification mapping (e.g., an array of objects with regex patterns) to evaluate the parsed name of each satellite. Apply the FIRST match found. If no match is found, default origin to "UNKNOWN/COALITION" and intel_class to "UNCLASSIFIED".
+
+Use these exact strings/patterns for the classifier:
+
+// SWARM / NOISE REDUCTION (Must be checked first)
+- Match: ["SDA", "PRAETORIAN", "STARLINK"] -> Origin: "USA", Class: "LEO SWARM" (Visual: Dimmed/50% opacity red)
+
+// RUSSIA
+- Match: ["COSMOS", "KOSMOS", "LOUCH", "PION", "GLONASS", "PARUS", "STRELA", "MERIDIAN", "RADUGA", "GORIZONT", "EKSRAN", "BLITS"] -> Origin: "RUSSIA", Class: "MILITARY/INTEL"
+
+// CHINA
+- Match: ["YAOGAN", "JIANBING", "GAOFEN", "SHIYAN", "BEIDOU", "COMPASS", "TIANLIAN", "CHUANGXIN", "QIANXING"] -> Origin: "CHINA", Class: "RECON/MILITARY"
+
+// UNITED STATES (Heavy Assets)
+- Match: ["USA ", "NROL", "FIA-RADAR", "LACROSSE", "KEYHOLE", "KH-", "WGS", "AEHF", "MILSTAR", "GPS", "NAVSTAR", "MUOS", "SBIRS", "DSP", "GSSAP", "TRUMPET", "MENTOR"] -> Origin: "USA", Class: "HEAVY INTEL/COMMS"
+
+// INDIA
+- Match: ["RISAT", "EMISAT", "CARTOSAT", "GSAT-7", "MICROSAT-R"] -> Origin: "INDIA", Class: "MILITARY/RECON"
+
+// NORTH KOREA
+- Match: ["MALLIGYONG", "KWANGMYONGSONG"] -> Origin: "NORTH KOREA", Class: "MILITARY"
+
+// EUROPEAN ALLIES
+- Match: ["SKYNET"] -> Origin: "UK", Class: "STRATCOM"
+- Match: ["SYRACUSE", "HELIOS", "CSO", "CERES", "PLEIADES"] -> Origin: "FRANCE", Class: "MIL/RECON"
+- Match: ["SAR-LUPE", "SARAH"] -> Origin: "GERMANY", Class: "RADAR INTEL"
+- Match: ["COSMO-SKYMED", "SICRAL"] -> Origin: "ITALY", Class: "DUAL-USE/MIL"
+- Match: ["PAZ", "SPAINSAT"] -> Origin: "SPAIN", Class: "DUAL-USE/MIL"
+
+// MIDDLE EAST / ASIA
+- Match: ["OFEQ", "TECSAR"] -> Origin: "ISRAEL", Class: "RECON"
+- Match: ["IGS "] -> Origin: "JAPAN", Class: "INFO GATHERING"
+
+3. UI & Visual Integrity:
+- ALL matched military/intel assets (except the dimmed LEO Swarm) must be rendered in the standard Tactical Red/Orange color on the 3D globe to maintain a cohesive UI.
+- When a satellite is clicked, the bottom-left Selected Target panel must prominently display the resolved "ORIGIN" and "CLASS".

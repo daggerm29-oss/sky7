@@ -1,0 +1,23 @@
+Act as an expert geospatial frontend developer. I want to build a real-time tactical geospatial intelligence interface called "WORLDVIEW". It must be a single-page HTML/JS/CSS application.
+
+Technical Stack & Assets:
+1. Map Engine: Use MapLibre GL JS.
+2. Basemap: Use the CARTO Dark Matter raster tiles (URL: https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png).
+3. Flight Data API: Use the free, unfiltered adsb.lol API. 
+   - Military Endpoint: https://api.adsb.lol/v2/mil
+   - Global/Public Endpoint: https://api.adsb.lol/v2/point/0/0/250 (Note: for global scale, adapt this to fetch a wide area or use the generic /v2/all if feasible, but implement a loading safeguard so the browser doesn't crash from too many data points).
+
+UI/UX Requirements (High-Tech Sci-Fi Vibe):
+1. The overall theme must be dark, sleek, and tactical (cyberpunk/intelligence agency aesthetic). Use a deep black background with glowing neon accents (e.g., cyan for public flights, amber/red for military).
+2. Create a left-aligned, semi-transparent frosted glass control panel (CSS backdrop-filter).
+3. Inside the panel, include a stylish toggle switch or buttons to filter between "PUBLIC AVIATION" and "MILITARY ASSETS". 
+4. Plot the aircraft on the MapLibre map as custom HTML markers or vector icons (SVG triangles pointing in the direction of the track heading).
+5. When an aircraft is clicked, open a high-tech styled popup or a dedicated section in the left panel displaying its details (Callsign, Type, Altitude, Speed, Squawk code).
+
+Functionality:
+1. Fetch the data asynchronously when the page loads.
+2. Map the latitude (lat) and longitude (lon) from the JSON response to the map markers.
+3. Rotate the marker icons based on the track (heading) value from the API.
+4. Auto-refresh the data every 10 seconds to keep the flights moving.
+
+Please generate the complete, self-contained index.html file containing the HTML structure, CSS styling, and JavaScript logic to make this functional immediately.
