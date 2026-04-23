@@ -1,7 +1,23 @@
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useEffect, useRef, useState, useCallback, useMemo } from "react";
 import maplibregl from "maplibre-gl";
 import { CesiumFollowCam } from "../components/CesiumFollowCam";
 import { SatelliteLayer, type SatPosition } from "../components/SatelliteLayer";
+
+// Active AO radius (km): satellites within this distance from the theater
+// centroid are flagged as "active overwatch" assets.
+const OVERWATCH_RADIUS_KM = 2500;
+
+// Haversine great-circle distance in km. Used for auto-acquisition.
+function haversineKm(lat1: number, lon1: number, lat2: number, lon2: number): number {
+  const R = 6371;
+  const toRad = (d: number) => (d * Math.PI) / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+  return 2 * R * Math.asin(Math.min(1, Math.sqrt(a)));
+}
 
 interface Aircraft {
   hex: string;
@@ -225,6 +241,160 @@ function StarField({ visible }: { visible: boolean }) {
   );
 }
 
+// ──────────────────────────────────────────────────────────────────────────────
+// Satellite intel panel — adapts to selection size:
+//   - 1 sat:  detailed single-target readout (origin, class, altitude, etc.)
+//   - >1 sat: condensed "ACTIVE OVERWATCH ASSETS" list with a count + names
+//             and per-row remove buttons so the operator can prune manually.
+// ──────────────────────────────────────────────────────────────────────────────
+function SatIntelPanel({
+  selectedSatIds,
+  satPosMap,
+  theaterActive,
+  theaterName,
+  onClearAll,
+  onRemoveOne,
+}: {
+  selectedSatIds: Set<string>;
+  satPosMap: Map<string, SatPosition>;
+  theaterActive: boolean;
+  theaterName: string | null;
+  onClearAll: () => void;
+  onRemoveOne: (id: string) => void;
+}) {
+  // Resolve current positions (some IDs may be transiently missing during a tick).
+  const sats = useMemo(() => {
+    const out: SatPosition[] = [];
+    for (const id of selectedSatIds) {
+      const p = satPosMap.get(id);
+      if (p) out.push(p);
+    }
+    // Most-prominent sats first: lower altitude (closer overhead) ranks higher.
+    return out.sort((a, b) => a.altKm - b.altKm);
+  }, [selectedSatIds, satPosMap]);
+
+  if (sats.length === 0) return null;
+
+  // ── Single-target detail view ──
+  if (sats.length === 1) {
+    const sel = sats[0];
+    const sc = sel.color;
+    return (
+      <div style={{ padding: "0 16px 10px", flexShrink: 0 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+          <div style={{ fontSize: 8, letterSpacing: "0.2em", color: "rgba(125,249,255,0.55)", textTransform: "uppercase" }}>SATELLITE INTEL</div>
+          <button
+            onClick={onClearAll}
+            style={{ fontSize: 8, letterSpacing: "0.1em", color: "rgba(125,249,255,0.45)", textTransform: "uppercase", background: "none", border: "none", cursor: "pointer", fontFamily: "'Share Tech Mono','Courier New',monospace" }}
+          >[CLR]</button>
+        </div>
+        <div style={{
+          padding: 10, borderRadius: 2,
+          background: "rgba(255,91,46,0.04)",
+          border: `1px solid ${sc}66`,
+        }}>
+          <div style={{ fontSize: 13, fontWeight: 700, letterSpacing: "0.12em", color: sc, textShadow: `0 0 10px ${sc}`, marginBottom: 8, textTransform: "uppercase", wordBreak: "break-word" }}>
+            {sel.name}
+          </div>
+          <StatRow label="ORIGIN" value={sel.origin} accent />
+          <StatRow label="CLASS"  value={sel.intelClass} accent />
+          <StatRow label="NORAD ID" value={sel.noradId} />
+          <StatRow label="ORBIT" value={sel.isGeo ? "GEOSTATIONARY" : sel.altKm > 5000 ? "MEO/HEO" : "LEO"} />
+          <StatRow label="ALTITUDE" value={`${sel.altKm.toFixed(0)} km`} accent />
+          <StatRow label="VELOCITY" value={`${sel.velocityKms.toFixed(2)} km/s`} />
+          <StatRow label="SUB-PT" value={`${sel.lat.toFixed(2)}, ${sel.lon.toFixed(2)}`} />
+          {sel.isGeo && (
+            <div style={{ marginTop: 8, fontSize: 8, letterSpacing: "0.08em", color: "rgba(255,200,180,0.55)", lineHeight: 1.5 }}>
+              GEO TRAJECTORY OMITTED · STATIONARY RELATIVE TO EARTH
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  // ── Multi-target overwatch list ──
+  return (
+    <div style={{ padding: "0 16px 10px", flexShrink: 0, display: "flex", flexDirection: "column", minHeight: 0 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+        <div style={{ fontSize: 8, letterSpacing: "0.2em", color: "rgba(125,249,255,0.55)", textTransform: "uppercase" }}>
+          ◈ ACTIVE OVERWATCH
+        </div>
+        <button
+          onClick={onClearAll}
+          style={{ fontSize: 8, letterSpacing: "0.1em", color: "rgba(125,249,255,0.45)", textTransform: "uppercase", background: "none", border: "none", cursor: "pointer", fontFamily: "'Share Tech Mono','Courier New',monospace" }}
+        >[CLR ALL]</button>
+      </div>
+      <div style={{
+        padding: "8px 10px", borderRadius: 2,
+        background: "rgba(125,249,255,0.04)",
+        border: "1px solid rgba(125,249,255,0.28)",
+        boxShadow: "inset 0 0 14px rgba(125,249,255,0.05)",
+      }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 6 }}>
+          <div style={{ fontSize: 9, letterSpacing: "0.16em", color: "rgba(125,249,255,0.85)", textTransform: "uppercase" }}>
+            ASSETS MONITORING
+          </div>
+          <div style={{ fontSize: 18, fontWeight: 700, color: "#7df9ff", textShadow: "0 0 10px rgba(125,249,255,0.6)", lineHeight: 1 }}>
+            {sats.length}
+          </div>
+        </div>
+        {theaterActive && theaterName && (
+          <div style={{ fontSize: 8, letterSpacing: "0.14em", color: "rgba(255,215,0,0.7)", textTransform: "uppercase", marginBottom: 6 }}>
+            ZONE: {theaterName}
+          </div>
+        )}
+        <div style={{ maxHeight: 180, overflowY: "auto", display: "flex", flexDirection: "column", gap: 3 }}>
+          {sats.map((s) => (
+            <div
+              key={s.noradId}
+              style={{
+                display: "flex", alignItems: "center", justifyContent: "space-between", gap: 6,
+                padding: "5px 6px", borderRadius: 2,
+                background: "rgba(0,255,255,0.025)",
+                border: "1px solid rgba(125,249,255,0.12)",
+              }}
+            >
+              <div style={{ display: "flex", flexDirection: "column", minWidth: 0, flex: 1 }}>
+                <div style={{
+                  fontSize: 10, fontWeight: 600, color: s.color, letterSpacing: "0.08em",
+                  textShadow: `0 0 6px ${s.color}88`,
+                  overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                  textTransform: "uppercase",
+                }}>
+                  {s.name}
+                </div>
+                <div style={{ fontSize: 8, color: "rgba(0,255,255,0.45)", letterSpacing: "0.06em", marginTop: 1 }}>
+                  {s.origin} · {s.altKm.toFixed(0)} KM
+                </div>
+              </div>
+              <button
+                onClick={() => onRemoveOne(s.noradId)}
+                title="Remove from overwatch"
+                style={{
+                  background: "none", border: "1px solid rgba(125,249,255,0.2)",
+                  color: "rgba(125,249,255,0.55)", cursor: "pointer",
+                  fontSize: 9, padding: "2px 6px", borderRadius: 2,
+                  fontFamily: "'Share Tech Mono','Courier New',monospace",
+                  letterSpacing: "0.1em",
+                }}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.color = "#7df9ff";
+                  e.currentTarget.style.borderColor = "rgba(125,249,255,0.6)";
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.color = "rgba(125,249,255,0.55)";
+                  e.currentTarget.style.borderColor = "rgba(125,249,255,0.2)";
+                }}
+              >✕</button>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function WorldviewMap() {
   const mapContainer = useRef<HTMLDivElement>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
@@ -246,7 +416,14 @@ export default function WorldviewMap() {
   const [mapLoadedState, setMapLoadedState] = useState(false);
   const [trackedHex, setTrackedHex] = useState<string | null>(null);
   const [satIntelOn, setSatIntelOn] = useState(false);
-  const [selectedSat, setSelectedSat] = useState<SatPosition | null>(null);
+  // Multi-select: a Set of NORAD IDs currently flagged for overwatch.
+  const [selectedSatIds, setSelectedSatIds] = useState<Set<string>>(new Set());
+  // Latest position snapshot keyed by NORAD ID — feeds the overwatch panel
+  // with live altitude/velocity for currently-selected sats.
+  const [satPosMap, setSatPosMap] = useState<Map<string, SatPosition>>(new Map());
+  // User overrides on top of auto-acquisition: explicitly added or removed.
+  const userAddedRef = useRef<Set<string>>(new Set());
+  const userRemovedRef = useRef<Set<string>>(new Set());
   const [visibility, setVisibility] = useState<"both" | "flights" | "satellites">("both");
   // Theater of Operations — free-text global search
   const [theaterSearch, setTheaterSearch] = useState("");
@@ -255,6 +432,9 @@ export default function WorldviewMap() {
   const [theaterActive, setTheaterActive] = useState(false);
   const [theaterLoading, setTheaterLoading] = useState(false);
   const [theaterError, setTheaterError] = useState<string | null>(null);
+  // Centroid [lon, lat] of the active theater — drives proximity fading + auto-acquisition.
+  const [theaterCenter, setTheaterCenter] = useState<[number, number] | null>(null);
+  const [theaterName, setTheaterName] = useState<string | null>(null);
   const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const selectedRef = useRef<Aircraft | null>(null);
@@ -596,7 +776,11 @@ export default function WorldviewMap() {
     setVis("aircraft-layer", showFlights);
     ["satellites-layer", "sat-orbit-line", "sat-orbit-glow", "sat-footprint-fill", "sat-footprint-ring", "sat-footprint-spokes", "sat-nadir-line", "sat-nadir-dot"].forEach((id) => setVis(id, showSats && satIntelOn));
     if (!showFlights && trackedHex) setTrackedHex(null);
-    if (!showSats) setSelectedSat(null);
+    if (!showSats) {
+      setSelectedSatIds(new Set());
+      userAddedRef.current = new Set();
+      userRemovedRef.current = new Set();
+    }
   }, [visibility, mapLoadedState, satIntelOn, trackedHex]);
 
   // THEATER OF OPERATIONS — debounced Nominatim autocomplete search
@@ -633,7 +817,12 @@ export default function WorldviewMap() {
     const shortName = hit.display_name.split(",")[0].trim();
     setTheaterSearch(shortName);
     setTheaterActive(true);
+    setTheaterName(shortName);
     setTheaterError(null);
+    // Reset user overrides on each new theater so auto-acquisition starts clean.
+    userAddedRef.current = new Set();
+    userRemovedRef.current = new Set();
+    setSelectedSatIds(new Set());
 
     const map = mapRef.current;
     if (!map || !mapLoadedState) return;
@@ -666,6 +855,7 @@ export default function WorldviewMap() {
 
     if (center) {
       const flyCenter = center;
+      setTheaterCenter([flyCenter[0], flyCenter[1]]);
       if (viewMode !== "3d") setViewMode("3d");
       const flyCinematic = () => {
         map.flyTo({ center: flyCenter, pitch: 75, zoom: 4, bearing: 0, duration: 2400, essential: true });
@@ -683,6 +873,11 @@ export default function WorldviewMap() {
     setTheaterDropdownOpen(false);
     setTheaterActive(false);
     setTheaterError(null);
+    setTheaterCenter(null);
+    setTheaterName(null);
+    userAddedRef.current = new Set();
+    userRemovedRef.current = new Set();
+    setSelectedSatIds(new Set());
     if (searchTimerRef.current) clearTimeout(searchTimerRef.current);
 
     const map = mapRef.current;
@@ -691,6 +886,61 @@ export default function WorldviewMap() {
     if (src) src.setData({ type: "FeatureCollection", features: [] });
     map.flyTo({ center: [0, 20], zoom: 2.5, pitch: 0, bearing: 0, duration: 1200 });
   }, [mapLoadedState]);
+
+  // ── SATELLITE OVERWATCH ──────────────────────────────────────────────────
+  // Receive the latest position snapshot from SatelliteLayer on each tick.
+  // Updates the lookup map for the panel and drives auto-acquisition when a
+  // theater is active.
+  const handleSatPositions = useCallback((positions: SatPosition[]) => {
+    // Build position-by-id map (cheap: positions are typically <1500 sats).
+    const next = new Map<string, SatPosition>();
+    for (const p of positions) next.set(p.noradId, p);
+    setSatPosMap(next);
+
+    if (!theaterActive || !theaterCenter) return;
+
+    // Auto-acquire all sats whose Nadir falls within OVERWATCH_RADIUS_KM of
+    // the theater centroid. User overrides (added / removed) are respected.
+    const [tLon, tLat] = theaterCenter;
+    const auto = new Set<string>();
+    for (const p of positions) {
+      // Skip noisy LEO swarms — they'd flood the overwatch panel otherwise.
+      if (p.isSwarm) continue;
+      const d = haversineKm(p.lat, p.lon, tLat, tLon);
+      if (d <= OVERWATCH_RADIUS_KM) auto.add(p.noradId);
+    }
+    // Apply user overrides.
+    for (const id of userAddedRef.current) auto.add(id);
+    for (const id of userRemovedRef.current) auto.delete(id);
+
+    // Only update state when the membership actually changed (avoid render churn).
+    setSelectedSatIds((prev) => {
+      if (prev.size === auto.size) {
+        let same = true;
+        for (const id of auto) if (!prev.has(id)) { same = false; break; }
+        if (same) return prev;
+      }
+      return auto;
+    });
+  }, [theaterActive, theaterCenter]);
+
+  // User clicked a sat → toggle it on/off in the selection set, recording an
+  // override so auto-acquisition doesn't immediately re-flip it.
+  const toggleSatSelection = useCallback((sat: SatPosition) => {
+    setSelectedSatIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(sat.noradId)) {
+        next.delete(sat.noradId);
+        userRemovedRef.current.add(sat.noradId);
+        userAddedRef.current.delete(sat.noradId);
+      } else {
+        next.add(sat.noradId);
+        userAddedRef.current.add(sat.noradId);
+        userRemovedRef.current.delete(sat.noradId);
+      }
+      return next;
+    });
+  }, []);
 
   // Smoothly follow the tracked aircraft: pan the map to its latest position on each data refresh
   useEffect(() => {
@@ -900,8 +1150,11 @@ export default function WorldviewMap() {
           base={base}
           map={mapRef.current}
           mapLoaded={mapLoadedState}
-          selectedNoradId={selectedSat?.noradId ?? null}
-          onSelect={(s) => setSelectedSat(s)}
+          selectedNoradIds={selectedSatIds}
+          onToggleSelect={(s) => toggleSatSelection(s)}
+          onPositionsUpdated={handleSatPositions}
+          theaterCenter={theaterActive ? theaterCenter : null}
+          proximityRadiusKm={OVERWATCH_RADIUS_KM}
         />
       )}
 
@@ -1048,7 +1301,14 @@ export default function WorldviewMap() {
             {/* SATELLITE INTEL — only meaningful in 3D orbital view */}
             {viewMode === "3d" && (
               <button
-                onClick={() => { setSatIntelOn((v) => !v); if (satIntelOn) setSelectedSat(null); }}
+                onClick={() => {
+                  setSatIntelOn((v) => !v);
+                  if (satIntelOn) {
+                    setSelectedSatIds(new Set());
+                    userAddedRef.current = new Set();
+                    userRemovedRef.current = new Set();
+                  }
+                }}
                 style={{
                   marginTop: 8, width: "100%", padding: "8px 6px", fontSize: 9,
                   letterSpacing: "0.12em", textTransform: "uppercase",
@@ -1316,44 +1576,31 @@ export default function WorldviewMap() {
 
           <Divider />
 
-          {/* SELECTED SATELLITE — only when SAT INTEL is on and one is picked */}
-          {selectedSat && satIntelOn && viewMode === "3d" && (
+          {/* SATELLITE INTEL PANEL — single-target details OR multi-target overwatch list */}
+          {satIntelOn && viewMode === "3d" && selectedSatIds.size > 0 && (
             <>
-              <div style={{ padding: "0 16px 10px", flexShrink: 0 }}>
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
-                  <div style={{ fontSize: 8, letterSpacing: "0.2em", color: "rgba(125,249,255,0.55)", textTransform: "uppercase" }}>SATELLITE INTEL</div>
-                  <button
-                    onClick={() => setSelectedSat(null)}
-                    style={{ fontSize: 8, letterSpacing: "0.1em", color: "rgba(125,249,255,0.45)", textTransform: "uppercase", background: "none", border: "none", cursor: "pointer", fontFamily: "'Share Tech Mono','Courier New',monospace" }}
-                  >[CLR]</button>
-                </div>
-                {(() => {
-                  const sc = selectedSat.color;
-                  return (
-                    <div style={{
-                      padding: 10, borderRadius: 2,
-                      background: "rgba(255,91,46,0.04)",
-                      border: `1px solid ${sc}66`,
-                    }}>
-                      <div style={{ fontSize: 13, fontWeight: 700, letterSpacing: "0.12em", color: sc, textShadow: `0 0 10px ${sc}`, marginBottom: 8, textTransform: "uppercase", wordBreak: "break-word" }}>
-                        {selectedSat.name}
-                      </div>
-                      <StatRow label="ORIGIN" value={selectedSat.origin} accent />
-                      <StatRow label="CLASS"  value={selectedSat.intelClass} accent />
-                      <StatRow label="NORAD ID" value={selectedSat.noradId} />
-                      <StatRow label="ORBIT" value={selectedSat.isGeo ? "GEOSTATIONARY" : selectedSat.altKm > 5000 ? "MEO/HEO" : "LEO"} />
-                      <StatRow label="ALTITUDE" value={`${selectedSat.altKm.toFixed(0)} km`} accent />
-                      <StatRow label="VELOCITY" value={`${selectedSat.velocityKms.toFixed(2)} km/s`} />
-                      <StatRow label="SUB-PT" value={`${selectedSat.lat.toFixed(2)}, ${selectedSat.lon.toFixed(2)}`} />
-                      {selectedSat.isGeo && (
-                        <div style={{ marginTop: 8, fontSize: 8, letterSpacing: "0.08em", color: "rgba(255,200,180,0.55)", lineHeight: 1.5 }}>
-                          GEO TRAJECTORY OMITTED · STATIONARY RELATIVE TO EARTH
-                        </div>
-                      )}
-                    </div>
-                  );
-                })()}
-              </div>
+              <SatIntelPanel
+                selectedSatIds={selectedSatIds}
+                satPosMap={satPosMap}
+                theaterActive={theaterActive}
+                theaterName={theaterName}
+                onClearAll={() => {
+                  setSelectedSatIds(new Set());
+                  // Mark every currently-auto-acquired sat as user-removed so
+                  // the next position tick doesn't re-add them.
+                  for (const id of selectedSatIds) userRemovedRef.current.add(id);
+                  userAddedRef.current = new Set();
+                }}
+                onRemoveOne={(id) => {
+                  setSelectedSatIds((prev) => {
+                    const next = new Set(prev);
+                    next.delete(id);
+                    return next;
+                  });
+                  userRemovedRef.current.add(id);
+                  userAddedRef.current.delete(id);
+                }}
+              />
               <Divider />
             </>
           )}

@@ -160,9 +160,16 @@ interface Props {
   base: string;
   map: maplibregl.Map | null;
   mapLoaded: boolean;
-  selectedNoradId: string | null;
-  onSelect: (sat: SatPosition | null) => void;
+  // Set of NORAD IDs that are currently selected (footprints rendered for each).
+  selectedNoradIds: Set<string>;
+  // Click toggles a sat on/off in the selection set.
+  onToggleSelect: (sat: SatPosition) => void;
   onPositionsUpdated?: (positions: SatPosition[]) => void;
+  // Active theater centroid [lon, lat]. When set, drives proximity fading.
+  theaterCenter?: [number, number] | null;
+  // Radius (km) defining the "Active AO" — sats inside are emphasized,
+  // sats outside are dimmed and downsized.
+  proximityRadiusKm?: number;
 }
 
 // CelesTrak groups for maximum coverage of disguised assets.
@@ -227,7 +234,7 @@ function propagate(rec: SatRecord, when: Date): SatPosition | null {
   };
 }
 
-function buildGeoJson(positions: SatPosition[], selectedId: string | null): GeoJSON.FeatureCollection {
+function buildGeoJson(positions: SatPosition[], selectedIds: Set<string>): GeoJSON.FeatureCollection {
   return {
     type: "FeatureCollection",
     features: positions.map((p) => ({
@@ -243,10 +250,22 @@ function buildGeoJson(positions: SatPosition[], selectedId: string | null): GeoJ
         // visual size — slightly bigger for higher orbits so altitude reads,
         // selected satellite gets a boost.
         size: (p.altKm > 30000 ? 1.6 : p.altKm > 5000 ? 1.2 : 0.9) *
-              (p.noradId === selectedId ? 1.7 : 1.0),
+              (selectedIds.has(p.noradId) ? 1.7 : 1.0),
       },
     })),
   };
+}
+
+// Haversine great-circle distance in km between two (lon,lat) points.
+function haversineKm(lat1: number, lon1: number, lat2: number, lon2: number): number {
+  const R = EARTH_R_KM;
+  const toRad = (d: number) => (d * Math.PI) / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+  return 2 * R * Math.asin(Math.min(1, Math.sqrt(a)));
 }
 
 // ── Sensor footprint geometry ──────────────────────────────────────────────
@@ -272,7 +291,7 @@ function computeGlobeAltitudeOffset(
   centerLat: number, centerLng: number,
   bearing: number, pitch: number,
   earthRadiusPx: number,
-): { dx: number; dy: number; visible: boolean } {
+): { dx: number; dy: number; visible: boolean; depth: number } {
   const lat0  = centerLat * Math.PI / 180;
   const lng0  = centerLng * Math.PI / 180;
   const latR  = latDeg    * Math.PI / 180;
@@ -309,10 +328,26 @@ function computeGlobeAltitudeOffset(
   const fy = ey * cP + ez * sP;
   const fz = -ey * sP + ez * cP;   // depth: > 0 = front hemisphere
 
+  // Sphere occlusion: with the camera looking down −Z (after the rotation
+  // stack), Earth is a unit sphere at the origin. The satellite sits at
+  // outward-radial distance (1 + altFraction) along the unit normal (fx,fy,fz).
+  // Its 3D position in camera space is therefore:
+  //     p = (fx, fy, fz) * (1 + altFraction)
+  // It is occluded by Earth iff p lies inside the Earth's silhouette
+  // (lateral_distance² < 1) AND it is on the far side (pz < 0).
+  // Adding a small angular safety margin keeps near-horizon icons from
+  // poking through the limb.
+  const r = 1 + altFraction;
+  const pz = fz * r;
+  const lateralSq = (fx * fx + fy * fy) * r * r;
+  // safety: shrink "Earth" silhouette by 1.5% to keep marker bodies clear
+  const occluded = pz < 0 && lateralSq < 0.97 * 0.97;
+
   return {
     dx:      fx * altFraction * earthRadiusPx,
     dy:     -fy * altFraction * earthRadiusPx,  // screen Y is inverted
-    visible: fz > 0,                             // fz ≤ 0 → behind the globe
+    visible: !occluded,
+    depth:   pz,                                 // > 0 = in front of Earth center
   };
 }
 
@@ -455,19 +490,25 @@ export function SatelliteLayer({
   base,
   map,
   mapLoaded,
-  selectedNoradId,
-  onSelect,
+  selectedNoradIds,
+  onToggleSelect,
   onPositionsUpdated,
+  theaterCenter,
+  proximityRadiusKm = 2500,
 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const recordsRef = useRef<SatRecord[]>([]);
   const positionsRef = useRef<SatPosition[]>([]);
-  const selectedIdRef = useRef<string | null>(selectedNoradId);
-  selectedIdRef.current = selectedNoradId;
-  const onSelectRef = useRef(onSelect);
-  onSelectRef.current = onSelect;
+  const selectedIdsRef = useRef<Set<string>>(selectedNoradIds);
+  selectedIdsRef.current = selectedNoradIds;
+  const onToggleSelectRef = useRef(onToggleSelect);
+  onToggleSelectRef.current = onToggleSelect;
   const onPositionsUpdatedRef = useRef(onPositionsUpdated);
   onPositionsUpdatedRef.current = onPositionsUpdated;
+  const theaterCenterRef = useRef<[number, number] | null | undefined>(theaterCenter);
+  theaterCenterRef.current = theaterCenter;
+  const proximityRadiusRef = useRef<number>(proximityRadiusKm);
+  proximityRadiusRef.current = proximityRadiusKm;
 
   // ---- Fetch + parse TLE for all groups once ----
   useEffect(() => {
@@ -633,23 +674,30 @@ export function SatelliteLayer({
       positionsRef.current = positions;
       onPositionsUpdatedRef.current?.(positions);
 
+      const selIds = selectedIdsRef.current;
       const src = map.getSource("satellites") as maplibregl.GeoJSONSource | undefined;
-      if (src) src.setData(buildGeoJson(positions, selectedIdRef.current));
+      if (src) src.setData(buildGeoJson(positions, selIds));
 
-      const selected = selectedIdRef.current
-        ? positions.find((p) => p.noradId === selectedIdRef.current)
-        : null;
+      const selectedSats = selIds.size > 0
+        ? positions.filter((p) => selIds.has(p.noradId))
+        : [];
       const orbitSrc = map.getSource("sat-orbit") as maplibregl.GeoJSONSource | undefined;
       const nadirSrc = map.getSource("sat-nadir") as maplibregl.GeoJSONSource | undefined;
       const footSrc  = map.getSource("sat-footprint") as maplibregl.GeoJSONSource | undefined;
-      if (selected) {
-        const rec = recordsRef.current.find((r) => r.noradId === selected.noradId);
+      if (selectedSats.length > 0) {
+        // Orbits — only the singly-selected case shows a trail to avoid clutter.
         if (orbitSrc) {
-          if (!selected.isGeo && rec) {
-            const orbit = buildOrbitGeoJson(rec, now);
-            orbitSrc.setData(orbit
-              ? { type: "FeatureCollection", features: [orbit] }
-              : { type: "FeatureCollection", features: [] });
+          if (selectedSats.length === 1) {
+            const sel = selectedSats[0];
+            const rec = recordsRef.current.find((r) => r.noradId === sel.noradId);
+            if (!sel.isGeo && rec) {
+              const orbit = buildOrbitGeoJson(rec, now);
+              orbitSrc.setData(orbit
+                ? { type: "FeatureCollection", features: [orbit] }
+                : { type: "FeatureCollection", features: [] });
+            } else {
+              orbitSrc.setData({ type: "FeatureCollection", features: [] });
+            }
           } else {
             orbitSrc.setData({ type: "FeatureCollection", features: [] });
           }
@@ -657,13 +705,17 @@ export function SatelliteLayer({
         if (nadirSrc) {
           nadirSrc.setData({
             type: "FeatureCollection",
-            features: [
-              { type: "Feature", geometry: { type: "Point", coordinates: [selected.lon, selected.lat] }, properties: {} },
-            ],
+            features: selectedSats.map((s) => ({
+              type: "Feature" as const,
+              geometry: { type: "Point" as const, coordinates: [s.lon, s.lat] },
+              properties: {},
+            })),
           });
         }
         if (footSrc) {
-          footSrc.setData({ type: "FeatureCollection", features: buildFootprintFeatures(selected) });
+          const allFeatures: GeoJSON.Feature[] = [];
+          for (const s of selectedSats) allFeatures.push(...buildFootprintFeatures(s));
+          footSrc.setData({ type: "FeatureCollection", features: allFeatures });
         }
       } else {
         orbitSrc?.setData({ type: "FeatureCollection", features: [] });
@@ -675,7 +727,7 @@ export function SatelliteLayer({
     tick();
     const interval = setInterval(tick, 2000);
     return () => { stopped = true; clearInterval(interval); };
-  }, [map, mapLoaded, selectedNoradId]);
+  }, [map, mapLoaded, selectedNoradIds]);
 
   // ── Canvas overlay: renders satellite icons at their true space altitude ──
   useEffect(() => {
@@ -696,7 +748,9 @@ export function SatelliteLayer({
       ctx.clearRect(0, 0, canvas.width, canvas.height);
 
       const positions = positionsRef.current;
-      const selId = selectedIdRef.current;
+      const selIds = selectedIdsRef.current;
+      const theater = theaterCenterRef.current;
+      const aoRadiusKm = proximityRadiusRef.current;
       const zoom = map.getZoom();
       const earthRadiusPx = (512 / (2 * Math.PI)) * Math.pow(2, zoom);
       const mapCenter  = map.getCenter();
@@ -713,7 +767,7 @@ export function SatelliteLayer({
           mapCenter.lat, mapCenter.lng,
           bearing, pitch, earthRadiusPx,
         );
-        if (!offset.visible) continue;     // behind the globe → skip
+        if (!offset.visible) continue;     // occluded by Earth → skip
 
         const groundPos = map.project(new maplibregl.LngLat(sat.lon, sat.lat));
         const sx = groundPos.x + offset.dx;
@@ -722,10 +776,27 @@ export function SatelliteLayer({
         // Skip off-screen
         if (sx < -120 || sx > canvas.width + 120 || sy < -2000 || sy > canvas.height + 120) continue;
 
-        const isSelected = sat.noradId === selId;
+        const isSelected = selIds.has(sat.noradId);
+
+        // ── Proximity fading (Geospatial Depth of Field) ──
+        // When a theater of operations is active, sats within the AO radius
+        // are emphasized, sats outside are visually suppressed.
+        let proxScale = 1.0;
+        let proxAlpha = 1.0;
+        if (theater) {
+          const dKm = haversineKm(sat.lat, sat.lon, theater[1], theater[0]);
+          if (dKm <= aoRadiusKm) {
+            proxScale = 1.5;
+            proxAlpha = 1.0;
+          } else {
+            proxScale = 0.5;
+            proxAlpha = 0.2;
+          }
+        }
+
         const baseSize = sat.altKm > 30000 ? 9 : sat.altKm > 5000 ? 8 : 7;
-        const size = baseSize * (isSelected ? 1.7 : 1.0);
-        const alpha = sat.opacity;
+        const size = baseSize * (isSelected ? 1.7 : 1.0) * proxScale;
+        const alpha = sat.opacity * proxAlpha;
         const color = sat.color;
         const bw = size * 0.52;
         const bh = size * 0.52;
@@ -839,7 +910,7 @@ export function SatelliteLayer({
           closest = sat;
         }
       }
-      if (closest) onSelectRef.current(closest);
+      if (closest) onToggleSelectRef.current(closest);
     };
 
     map.on("click", handleMapClick);
