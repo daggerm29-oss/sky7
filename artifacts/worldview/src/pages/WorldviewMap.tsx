@@ -242,12 +242,82 @@ function StarField({ visible }: { visible: boolean }) {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-// Satellite intel panel — adapts to selection size:
-//   - 1 sat:  detailed single-target readout (origin, class, altitude, etc.)
-//   - >1 sat: condensed "ACTIVE OVERWATCH ASSETS" list with a count + names
-//             and per-row remove buttons so the operator can prune manually.
+// Resolve a Set<noradId> + position map into a sorted list of live SatPositions.
+// Shared by the left-HUD detail view and the right-side overwatch panel.
 // ──────────────────────────────────────────────────────────────────────────────
-function SatIntelPanel({
+function useResolvedSats(
+  selectedSatIds: Set<string>,
+  satPosMap: Map<string, SatPosition>,
+): SatPosition[] {
+  return useMemo(() => {
+    const out: SatPosition[] = [];
+    for (const id of selectedSatIds) {
+      const p = satPosMap.get(id);
+      if (p) out.push(p);
+    }
+    return out.sort((a, b) => a.altKm - b.altKm);
+  }, [selectedSatIds, satPosMap]);
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Single-target detail readout — rendered inside the left HUD when exactly one
+// satellite is selected. Multi-target selections use OverwatchListPanel instead
+// (rendered as a floating right-side panel so the left HUD doesn't overflow).
+// ──────────────────────────────────────────────────────────────────────────────
+function SatIntelDetail({
+  selectedSatIds,
+  satPosMap,
+  onClear,
+}: {
+  selectedSatIds: Set<string>;
+  satPosMap: Map<string, SatPosition>;
+  onClear: () => void;
+}) {
+  const sats = useResolvedSats(selectedSatIds, satPosMap);
+  if (sats.length !== 1) return null;
+  const sel = sats[0];
+  const sc = sel.color;
+  return (
+    <div style={{ padding: "0 16px 10px", flexShrink: 0 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+        <div style={{ fontSize: 8, letterSpacing: "0.2em", color: "rgba(125,249,255,0.55)", textTransform: "uppercase" }}>SATELLITE INTEL</div>
+        <button
+          onClick={onClear}
+          style={{ fontSize: 8, letterSpacing: "0.1em", color: "rgba(125,249,255,0.45)", textTransform: "uppercase", background: "none", border: "none", cursor: "pointer", fontFamily: "'Share Tech Mono','Courier New',monospace" }}
+        >[CLR]</button>
+      </div>
+      <div style={{
+        padding: 10, borderRadius: 2,
+        background: "rgba(255,91,46,0.04)",
+        border: `1px solid ${sc}66`,
+      }}>
+        <div style={{ fontSize: 13, fontWeight: 700, letterSpacing: "0.12em", color: sc, textShadow: `0 0 10px ${sc}`, marginBottom: 8, textTransform: "uppercase", wordBreak: "break-word" }}>
+          {sel.name}
+        </div>
+        <StatRow label="ORIGIN" value={sel.origin} accent />
+        <StatRow label="CLASS"  value={sel.intelClass} accent />
+        <StatRow label="NORAD ID" value={sel.noradId} />
+        <StatRow label="ORBIT" value={sel.isGeo ? "GEOSTATIONARY" : sel.altKm > 5000 ? "MEO/HEO" : "LEO"} />
+        <StatRow label="ALTITUDE" value={`${sel.altKm.toFixed(0)} km`} accent />
+        <StatRow label="VELOCITY" value={`${sel.velocityKms.toFixed(2)} km/s`} />
+        <StatRow label="SUB-PT" value={`${sel.lat.toFixed(2)}, ${sel.lon.toFixed(2)}`} />
+        {sel.isGeo && (
+          <div style={{ marginTop: 8, fontSize: 8, letterSpacing: "0.08em", color: "rgba(255,200,180,0.55)", lineHeight: 1.5 }}>
+            GEO TRAJECTORY OMITTED · STATIONARY RELATIVE TO EARTH
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Floating right-side overwatch list — used when 2+ satellites are selected
+// (typically via theater auto-acquisition). Mounted as `position: absolute`
+// near the top-right of the map so the left HUD stays compact even when the
+// theater pulls in dozens of assets. Internally scrollable + height-capped.
+// ──────────────────────────────────────────────────────────────────────────────
+function OverwatchListPanel({
   selectedSatIds,
   satPosMap,
   theaterActive,
@@ -262,62 +332,30 @@ function SatIntelPanel({
   onClearAll: () => void;
   onRemoveOne: (id: string) => void;
 }) {
-  // Resolve current positions (some IDs may be transiently missing during a tick).
-  const sats = useMemo(() => {
-    const out: SatPosition[] = [];
-    for (const id of selectedSatIds) {
-      const p = satPosMap.get(id);
-      if (p) out.push(p);
-    }
-    // Most-prominent sats first: lower altitude (closer overhead) ranks higher.
-    return out.sort((a, b) => a.altKm - b.altKm);
-  }, [selectedSatIds, satPosMap]);
+  const sats = useResolvedSats(selectedSatIds, satPosMap);
+  if (sats.length < 2) return null;
 
-  if (sats.length === 0) return null;
-
-  // ── Single-target detail view ──
-  if (sats.length === 1) {
-    const sel = sats[0];
-    const sc = sel.color;
-    return (
-      <div style={{ padding: "0 16px 10px", flexShrink: 0 }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
-          <div style={{ fontSize: 8, letterSpacing: "0.2em", color: "rgba(125,249,255,0.55)", textTransform: "uppercase" }}>SATELLITE INTEL</div>
-          <button
-            onClick={onClearAll}
-            style={{ fontSize: 8, letterSpacing: "0.1em", color: "rgba(125,249,255,0.45)", textTransform: "uppercase", background: "none", border: "none", cursor: "pointer", fontFamily: "'Share Tech Mono','Courier New',monospace" }}
-          >[CLR]</button>
-        </div>
-        <div style={{
-          padding: 10, borderRadius: 2,
-          background: "rgba(255,91,46,0.04)",
-          border: `1px solid ${sc}66`,
-        }}>
-          <div style={{ fontSize: 13, fontWeight: 700, letterSpacing: "0.12em", color: sc, textShadow: `0 0 10px ${sc}`, marginBottom: 8, textTransform: "uppercase", wordBreak: "break-word" }}>
-            {sel.name}
-          </div>
-          <StatRow label="ORIGIN" value={sel.origin} accent />
-          <StatRow label="CLASS"  value={sel.intelClass} accent />
-          <StatRow label="NORAD ID" value={sel.noradId} />
-          <StatRow label="ORBIT" value={sel.isGeo ? "GEOSTATIONARY" : sel.altKm > 5000 ? "MEO/HEO" : "LEO"} />
-          <StatRow label="ALTITUDE" value={`${sel.altKm.toFixed(0)} km`} accent />
-          <StatRow label="VELOCITY" value={`${sel.velocityKms.toFixed(2)} km/s`} />
-          <StatRow label="SUB-PT" value={`${sel.lat.toFixed(2)}, ${sel.lon.toFixed(2)}`} />
-          {sel.isGeo && (
-            <div style={{ marginTop: 8, fontSize: 8, letterSpacing: "0.08em", color: "rgba(255,200,180,0.55)", lineHeight: 1.5 }}>
-              GEO TRAJECTORY OMITTED · STATIONARY RELATIVE TO EARTH
-            </div>
-          )}
-        </div>
-      </div>
-    );
-  }
-
-  // ── Multi-target overwatch list ──
   return (
-    <div style={{ padding: "0 16px 10px", flexShrink: 0, display: "flex", flexDirection: "column", minHeight: 0 }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
-        <div style={{ fontSize: 8, letterSpacing: "0.2em", color: "rgba(125,249,255,0.55)", textTransform: "uppercase" }}>
+    <div
+      style={{
+        position: "absolute",
+        top: 14,
+        right: 14,
+        zIndex: 10,
+        width: 260,
+        maxHeight: "calc(100vh - 28px)",
+        display: "flex",
+        flexDirection: "column",
+        background: "rgba(2,4,8,0.88)",
+        backdropFilter: "blur(20px)",
+        border: "1px solid rgba(125,249,255,0.28)",
+        borderRadius: 2,
+        boxShadow: "inset 0 0 14px rgba(125,249,255,0.05), 0 6px 24px rgba(0,0,0,0.5)",
+        fontFamily: "'Share Tech Mono','Courier New',monospace",
+      }}
+    >
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 12px 6px" }}>
+        <div style={{ fontSize: 8, letterSpacing: "0.2em", color: "rgba(125,249,255,0.6)", textTransform: "uppercase" }}>
           ◈ ACTIVE OVERWATCH
         </div>
         <button
@@ -325,71 +363,68 @@ function SatIntelPanel({
           style={{ fontSize: 8, letterSpacing: "0.1em", color: "rgba(125,249,255,0.45)", textTransform: "uppercase", background: "none", border: "none", cursor: "pointer", fontFamily: "'Share Tech Mono','Courier New',monospace" }}
         >[CLR ALL]</button>
       </div>
-      <div style={{
-        padding: "8px 10px", borderRadius: 2,
-        background: "rgba(125,249,255,0.04)",
-        border: "1px solid rgba(125,249,255,0.28)",
-        boxShadow: "inset 0 0 14px rgba(125,249,255,0.05)",
-      }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 6 }}>
+
+      <div style={{ padding: "0 12px 8px" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
           <div style={{ fontSize: 9, letterSpacing: "0.16em", color: "rgba(125,249,255,0.85)", textTransform: "uppercase" }}>
             ASSETS MONITORING
           </div>
-          <div style={{ fontSize: 18, fontWeight: 700, color: "#7df9ff", textShadow: "0 0 10px rgba(125,249,255,0.6)", lineHeight: 1 }}>
+          <div style={{ fontSize: 22, fontWeight: 700, color: "#7df9ff", textShadow: "0 0 10px rgba(125,249,255,0.6)", lineHeight: 1 }}>
             {sats.length}
           </div>
         </div>
         {theaterActive && theaterName && (
-          <div style={{ fontSize: 8, letterSpacing: "0.14em", color: "rgba(255,215,0,0.7)", textTransform: "uppercase", marginBottom: 6 }}>
+          <div style={{ fontSize: 8, letterSpacing: "0.14em", color: "rgba(255,215,0,0.7)", textTransform: "uppercase", marginTop: 6 }}>
             ZONE: {theaterName}
           </div>
         )}
-        <div style={{ maxHeight: 180, overflowY: "auto", display: "flex", flexDirection: "column", gap: 3 }}>
-          {sats.map((s) => (
-            <div
-              key={s.noradId}
-              style={{
-                display: "flex", alignItems: "center", justifyContent: "space-between", gap: 6,
-                padding: "5px 6px", borderRadius: 2,
-                background: "rgba(0,255,255,0.025)",
-                border: "1px solid rgba(125,249,255,0.12)",
-              }}
-            >
-              <div style={{ display: "flex", flexDirection: "column", minWidth: 0, flex: 1 }}>
-                <div style={{
-                  fontSize: 10, fontWeight: 600, color: s.color, letterSpacing: "0.08em",
-                  textShadow: `0 0 6px ${s.color}88`,
-                  overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-                  textTransform: "uppercase",
-                }}>
-                  {s.name}
-                </div>
-                <div style={{ fontSize: 8, color: "rgba(0,255,255,0.45)", letterSpacing: "0.06em", marginTop: 1 }}>
-                  {s.origin} · {s.altKm.toFixed(0)} KM
-                </div>
+      </div>
+
+      <div style={{ padding: "0 8px 10px", overflowY: "auto", display: "flex", flexDirection: "column", gap: 3, minHeight: 0 }}>
+        {sats.map((s) => (
+          <div
+            key={s.noradId}
+            style={{
+              display: "flex", alignItems: "center", justifyContent: "space-between", gap: 6,
+              padding: "5px 6px", borderRadius: 2,
+              background: "rgba(0,255,255,0.025)",
+              border: "1px solid rgba(125,249,255,0.12)",
+            }}
+          >
+            <div style={{ display: "flex", flexDirection: "column", minWidth: 0, flex: 1 }}>
+              <div style={{
+                fontSize: 10, fontWeight: 600, color: s.color, letterSpacing: "0.08em",
+                textShadow: `0 0 6px ${s.color}88`,
+                overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                textTransform: "uppercase",
+              }}>
+                {s.name}
               </div>
-              <button
-                onClick={() => onRemoveOne(s.noradId)}
-                title="Remove from overwatch"
-                style={{
-                  background: "none", border: "1px solid rgba(125,249,255,0.2)",
-                  color: "rgba(125,249,255,0.55)", cursor: "pointer",
-                  fontSize: 9, padding: "2px 6px", borderRadius: 2,
-                  fontFamily: "'Share Tech Mono','Courier New',monospace",
-                  letterSpacing: "0.1em",
-                }}
-                onMouseEnter={(e) => {
-                  e.currentTarget.style.color = "#7df9ff";
-                  e.currentTarget.style.borderColor = "rgba(125,249,255,0.6)";
-                }}
-                onMouseLeave={(e) => {
-                  e.currentTarget.style.color = "rgba(125,249,255,0.55)";
-                  e.currentTarget.style.borderColor = "rgba(125,249,255,0.2)";
-                }}
-              >✕</button>
+              <div style={{ fontSize: 8, color: "rgba(0,255,255,0.45)", letterSpacing: "0.06em", marginTop: 1 }}>
+                {s.origin} · {s.altKm.toFixed(0)} KM
+              </div>
             </div>
-          ))}
-        </div>
+            <button
+              onClick={() => onRemoveOne(s.noradId)}
+              title="Remove from overwatch"
+              style={{
+                background: "none", border: "1px solid rgba(125,249,255,0.2)",
+                color: "rgba(125,249,255,0.55)", cursor: "pointer",
+                fontSize: 9, padding: "2px 6px", borderRadius: 2,
+                fontFamily: "'Share Tech Mono','Courier New',monospace",
+                letterSpacing: "0.1em",
+              }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.color = "#7df9ff";
+                e.currentTarget.style.borderColor = "rgba(125,249,255,0.6)";
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.color = "rgba(125,249,255,0.55)";
+                e.currentTarget.style.borderColor = "rgba(125,249,255,0.2)";
+              }}
+            >✕</button>
+          </div>
+        ))}
       </div>
     </div>
   );
@@ -1576,29 +1611,18 @@ export default function WorldviewMap() {
 
           <Divider />
 
-          {/* SATELLITE INTEL PANEL — single-target details OR multi-target overwatch list */}
-          {satIntelOn && viewMode === "3d" && selectedSatIds.size > 0 && (
+          {/* SATELLITE INTEL — single-target detail only. Multi-target overwatch
+              renders as a separate floating panel on the right (see below) so
+              the left HUD doesn't overflow when many assets are auto-acquired. */}
+          {satIntelOn && viewMode === "3d" && selectedSatIds.size === 1 && (
             <>
-              <SatIntelPanel
+              <SatIntelDetail
                 selectedSatIds={selectedSatIds}
                 satPosMap={satPosMap}
-                theaterActive={theaterActive}
-                theaterName={theaterName}
-                onClearAll={() => {
-                  setSelectedSatIds(new Set());
-                  // Mark every currently-auto-acquired sat as user-removed so
-                  // the next position tick doesn't re-add them.
+                onClear={() => {
                   for (const id of selectedSatIds) userRemovedRef.current.add(id);
                   userAddedRef.current = new Set();
-                }}
-                onRemoveOne={(id) => {
-                  setSelectedSatIds((prev) => {
-                    const next = new Set(prev);
-                    next.delete(id);
-                    return next;
-                  });
-                  userRemovedRef.current.add(id);
-                  userAddedRef.current.delete(id);
+                  setSelectedSatIds(new Set());
                 }}
               />
               <Divider />
@@ -1689,6 +1713,30 @@ export default function WorldviewMap() {
           </div>
         </div>
       </div>
+
+      {/* FLOATING OVERWATCH LIST — multi-target sat selection (3D + SAT INTEL) */}
+      {satIntelOn && viewMode === "3d" && (
+        <OverwatchListPanel
+          selectedSatIds={selectedSatIds}
+          satPosMap={satPosMap}
+          theaterActive={theaterActive}
+          theaterName={theaterName}
+          onClearAll={() => {
+            for (const id of selectedSatIds) userRemovedRef.current.add(id);
+            userAddedRef.current = new Set();
+            setSelectedSatIds(new Set());
+          }}
+          onRemoveOne={(id) => {
+            setSelectedSatIds((prev) => {
+              const next = new Set(prev);
+              next.delete(id);
+              return next;
+            });
+            userRemovedRef.current.add(id);
+            userAddedRef.current.delete(id);
+          }}
+        />
+      )}
 
       {/* TOP-RIGHT LEGEND / FEED INFO — only in 2D */}
       {viewMode === "2d" && (
