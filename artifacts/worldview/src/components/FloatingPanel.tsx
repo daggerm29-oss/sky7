@@ -21,6 +21,15 @@ export interface FloatingPanelProps {
   onClose: () => void;
   /** Optional initial minimized state. */
   defaultMinimized?: boolean;
+  /** Forwarded ref to the panel's outer DOM node. Useful for sibling panels
+   *  that need to compute snap-to-dock geometry (e.g. magnetic re-docking). */
+  panelRef?: React.RefObject<HTMLDivElement | null>;
+  /** Extra buttons rendered in the header, immediately before minimize / close.
+   *  Children that should not initiate a drag must include `data-no-drag`. */
+  extraHeaderButtons?: ReactNode;
+  /** Fired after the user finishes a drag with the panel's final position.
+   *  Parents use this to implement snap-to-dock or persistence. */
+  onDragEnd?: (pos: { x: number; y: number }) => void;
   children: ReactNode;
 }
 
@@ -40,9 +49,15 @@ export function FloatingPanel({
   accentColor = "#00ffff",
   onClose,
   defaultMinimized = false,
+  panelRef,
+  extraHeaderButtons,
+  onDragEnd,
   children,
 }: FloatingPanelProps) {
   const [pos, setPos] = useState({ x: initialX, y: initialY });
+  // Shadow ref so the drag handler can read the live position without waiting
+  // for React state to flush, and so onDragEnd reports the correct final pos.
+  const posRef = useRef(pos);
   const [minimized, setMinimized] = useState(defaultMinimized);
   const [zIndex, setZIndex] = useState<number>(() => nextZ());
   const dragRef = useRef<{
@@ -52,7 +67,7 @@ export function FloatingPanel({
   const bringToFront = () => setZIndex(nextZ());
 
   const onHeaderPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
-    // Don't initiate drag from button clicks (minimize / close).
+    // Don't initiate drag from button clicks (minimize / close / extras).
     if ((e.target as HTMLElement).closest("[data-no-drag]")) return;
     e.preventDefault();
     bringToFront();
@@ -66,12 +81,16 @@ export function FloatingPanel({
       const margin = 30;
       const newX = Math.max(-(width - 80), Math.min(window.innerWidth - margin, d.origX + ev.clientX - d.startX));
       const newY = Math.max(0, Math.min(window.innerHeight - margin, d.origY + ev.clientY - d.startY));
-      setPos({ x: newX, y: newY });
+      const next = { x: newX, y: newY };
+      posRef.current = next;
+      setPos(next);
     };
     const onUp = () => {
+      const wasDragging = dragRef.current !== null;
       dragRef.current = null;
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
+      if (wasDragging && onDragEnd) onDragEnd(posRef.current);
     };
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp);
@@ -79,6 +98,7 @@ export function FloatingPanel({
 
   return (
     <div
+      ref={panelRef}
       onMouseDownCapture={bringToFront}
       style={{
         position: "absolute",
@@ -125,7 +145,8 @@ export function FloatingPanel({
             {title}
           </span>
         </div>
-        <div style={{ display: "flex", gap: 3 }} data-no-drag>
+        <div style={{ display: "flex", gap: 3, alignItems: "center" }} data-no-drag>
+          {extraHeaderButtons}
           <PanelButton
             accent={accentColor}
             title={minimized ? "Restore" : "Minimize"}

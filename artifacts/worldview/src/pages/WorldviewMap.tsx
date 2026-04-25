@@ -382,7 +382,7 @@ function OverwatchListPanel({
         )}
       </div>
 
-      <div style={{ padding: "0 8px 10px", overflowY: "auto", display: "flex", flexDirection: "column", gap: 3, minHeight: 0 }}>
+      <div className="glow-scroll" style={{ padding: "0 8px 10px", overflowY: "auto", display: "flex", flexDirection: "column", gap: 3, minHeight: 0 }}>
         {sats.map((s) => (
           <div
             key={s.noradId}
@@ -459,6 +459,11 @@ export default function WorldviewMap() {
   // left toolbar toggles them open/closed. New panels (Maritime Intel, etc.)
   // get added here as more state slots.
   const [aviationPanelOpen, setAviationPanelOpen] = useState(true);
+  // Contacts can be detached from the Aviation Intel panel into its own
+  // floating window. Dragging the floating window back near the right edge of
+  // the Aviation Intel panel re-docks it (magnetic snap).
+  const [contactsDocked, setContactsDocked] = useState(true);
+  const aviationPanelDOMRef = useRef<HTMLDivElement | null>(null);
   // Multi-select: a Set of NORAD IDs currently flagged for overwatch.
   const [selectedSatIds, setSelectedSatIds] = useState<Set<string>>(new Set());
   // Latest position snapshot keyed by NORAD ID — feeds the overwatch panel
@@ -1285,6 +1290,7 @@ export default function WorldviewMap() {
           initialX={54}
           initialY={14}
           width={300}
+          panelRef={aviationPanelDOMRef}
           onClose={() => setAviationPanelOpen(false)}
         >
         <div style={{
@@ -1694,47 +1700,91 @@ export default function WorldviewMap() {
             </>
           )}
 
-          {/* CONTACTS LIST */}
-          <div style={{ padding: "0 16px 6px", flexShrink: 0, display: "flex", justifyContent: "space-between" }}>
-            <div style={{ fontSize: 8, letterSpacing: "0.18em", color: "rgba(0,255,255,0.35)", textTransform: "uppercase" }}>CONTACTS</div>
-            <div style={{ fontSize: 8, color: "rgba(0,255,255,0.25)" }}>{displayedAircraft.length} / {aircraft.length}</div>
-          </div>
+          {/* CONTACTS LIST — when docked, renders inline. When detached, this
+              block is hidden and the same content renders in a separate
+              FloatingPanel (see below). */}
+          {contactsDocked && (
+            <>
+              <div style={{ padding: "0 16px 6px", flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 6 }}>
+                <div style={{ fontSize: 8, letterSpacing: "0.18em", color: "rgba(0,255,255,0.35)", textTransform: "uppercase" }}>CONTACTS</div>
+                <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                  <div style={{ fontSize: 8, color: "rgba(0,255,255,0.25)" }}>{displayedAircraft.length} / {aircraft.length}</div>
+                  <button
+                    type="button"
+                    title="Detach into floating window"
+                    onClick={() => setContactsDocked(false)}
+                    style={{
+                      background: "transparent", border: "1px solid rgba(0,255,255,0.25)",
+                      color: "rgba(0,255,255,0.7)", cursor: "pointer",
+                      width: 18, height: 16, padding: 0, borderRadius: 2,
+                      fontSize: 9, lineHeight: 1, display: "inline-flex",
+                      alignItems: "center", justifyContent: "center",
+                      fontFamily: "'Share Tech Mono','Courier New',monospace",
+                    }}
+                    onMouseEnter={(e) => { e.currentTarget.style.background = "rgba(0,255,255,0.12)"; e.currentTarget.style.color = "#7df9ff"; }}
+                    onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = "rgba(0,255,255,0.7)"; }}
+                  >⤢</button>
+                </div>
+              </div>
 
-          {error && (
-            <div style={{ margin: "0 16px 8px", padding: "5px 8px", background: "rgba(255,50,50,0.07)", border: "1px solid rgba(255,50,50,0.2)", borderRadius: 2, fontSize: 9, color: "rgba(255,100,100,0.7)", letterSpacing: "0.1em" }}>
-              ⚠ {error}
-            </div>
+              {error && (
+                <div style={{ margin: "0 16px 8px", padding: "5px 8px", background: "rgba(255,50,50,0.07)", border: "1px solid rgba(255,50,50,0.2)", borderRadius: 2, fontSize: 9, color: "rgba(255,100,100,0.7)", letterSpacing: "0.1em" }}>
+                  ⚠ {error}
+                </div>
+              )}
+
+              <div className="glow-scroll" style={{ flex: 1, overflowY: "auto", padding: "0 16px 8px", display: "flex", flexDirection: "column", gap: 3 }}>
+                {displayedAircraft.map((a) => {
+                  const isSelected = selectedAircraft?.hex === a.hex;
+                  return (
+                    <div
+                      key={a.hex}
+                      onClick={() => handleSelectAircraft(a)}
+                      style={{
+                        padding: "7px 9px", borderRadius: 2, cursor: "pointer", transition: "all 0.15s",
+                        background: isSelected ? (isMil ? "rgba(255,107,53,0.08)" : "rgba(0,255,255,0.07)") : "rgba(0,255,255,0.015)",
+                        border: `1px solid ${isSelected ? (isMil ? "rgba(255,107,53,0.4)" : "rgba(0,255,255,0.4)") : "rgba(0,255,255,0.07)"}`,
+                      }}
+                    >
+                      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 6 }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
+                          <AircraftSVG isMil={isMil} size={9} />
+                          <span style={{ fontSize: 11, fontWeight: 600, letterSpacing: "0.07em", color: accentColor, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                            {formatCallsign(a)}
+                          </span>
+                        </div>
+                        {a.alt_baro !== undefined && (
+                          <span style={{ fontSize: 8, color: "rgba(0,255,255,0.35)", flexShrink: 0 }}>{formatAlt(a.alt_baro)}</span>
+                        )}
+                      </div>
+                      {a.t && <div style={{ fontSize: 8, color: "rgba(0,255,255,0.25)", marginTop: 2 }}>{a.t}</div>}
+                    </div>
+                  );
+                })}
+              </div>
+            </>
           )}
 
-          <div style={{ flex: 1, overflowY: "auto", padding: "0 16px 8px", display: "flex", flexDirection: "column", gap: 3 }}>
-            {displayedAircraft.map((a) => {
-              const isSelected = selectedAircraft?.hex === a.hex;
-              return (
-                <div
-                  key={a.hex}
-                  onClick={() => handleSelectAircraft(a)}
-                  style={{
-                    padding: "7px 9px", borderRadius: 2, cursor: "pointer", transition: "all 0.15s",
-                    background: isSelected ? (isMil ? "rgba(255,107,53,0.08)" : "rgba(0,255,255,0.07)") : "rgba(0,255,255,0.015)",
-                    border: `1px solid ${isSelected ? (isMil ? "rgba(255,107,53,0.4)" : "rgba(0,255,255,0.4)") : "rgba(0,255,255,0.07)"}`,
-                  }}
-                >
-                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 6 }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
-                      <AircraftSVG isMil={isMil} size={9} />
-                      <span style={{ fontSize: 11, fontWeight: 600, letterSpacing: "0.07em", color: accentColor, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                        {formatCallsign(a)}
-                      </span>
-                    </div>
-                    {a.alt_baro !== undefined && (
-                      <span style={{ fontSize: 8, color: "rgba(0,255,255,0.35)", flexShrink: 0 }}>{formatAlt(a.alt_baro)}</span>
-                    )}
-                  </div>
-                  {a.t && <div style={{ fontSize: 8, color: "rgba(0,255,255,0.25)", marginTop: 2 }}>{a.t}</div>}
-                </div>
-              );
-            })}
-          </div>
+          {/* When detached, leave a small breadcrumb so the user can find it */}
+          {!contactsDocked && (
+            <div style={{ padding: "0 16px 8px", flexShrink: 0 }}>
+              <button
+                type="button"
+                onClick={() => setContactsDocked(true)}
+                style={{
+                  width: "100%", padding: "8px 10px", fontSize: 9, letterSpacing: "0.14em",
+                  textTransform: "uppercase",
+                  background: "rgba(0,255,255,0.04)",
+                  border: "1px dashed rgba(0,255,255,0.35)",
+                  color: "rgba(0,255,255,0.7)",
+                  borderRadius: 2, cursor: "pointer",
+                  fontFamily: "'Share Tech Mono','Courier New',monospace",
+                }}
+                onMouseEnter={(e) => { e.currentTarget.style.background = "rgba(0,255,255,0.1)"; e.currentTarget.style.color = "#7df9ff"; }}
+                onMouseLeave={(e) => { e.currentTarget.style.background = "rgba(0,255,255,0.04)"; e.currentTarget.style.color = "rgba(0,255,255,0.7)"; }}
+              >⇲ DOCK CONTACTS</button>
+            </div>
+          )}
 
           <div style={{ height: 1, background: "linear-gradient(90deg,transparent,rgba(0,255,255,0.2),transparent)", margin: "0 16px" }} />
           <div style={{ padding: "6px 16px", flexShrink: 0, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
@@ -1747,6 +1797,91 @@ export default function WorldviewMap() {
             </div>
           </div>
         </div>
+        </FloatingPanel>
+      )}
+
+      {/* DETACHED CONTACTS PANEL — appears when the user pops contacts out of
+          Aviation Intel. Has its own header (drag/minimize/close) plus a custom
+          DOCK button. Releasing a drag near the right edge of the Aviation
+          Intel panel auto-snaps it back to its docked position. */}
+      {aviationPanelOpen && !contactsDocked && (
+        <FloatingPanel
+          title="CONTACTS"
+          initialX={368}
+          initialY={14}
+          width={260}
+          maxHeight="calc(100vh - 28px)"
+          onClose={() => setContactsDocked(true)}
+          extraHeaderButtons={
+            <button
+              type="button"
+              title="Dock back into Aviation Intel"
+              onClick={() => setContactsDocked(true)}
+              style={{
+                background: "transparent", border: "1px solid rgba(0,255,255,0.3)",
+                color: "rgba(0,255,255,0.75)", cursor: "pointer",
+                width: 38, height: 18, padding: 0, borderRadius: 2,
+                fontSize: 8, lineHeight: 1, letterSpacing: "0.12em",
+                fontFamily: "'Share Tech Mono','Courier New',monospace",
+                display: "inline-flex", alignItems: "center", justifyContent: "center",
+              }}
+              onMouseEnter={(e) => { e.currentTarget.style.background = "rgba(0,255,255,0.12)"; e.currentTarget.style.color = "#7df9ff"; }}
+              onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = "rgba(0,255,255,0.75)"; }}
+            >⇲ DOCK</button>
+          }
+          onDragEnd={(p) => {
+            // Magnetic snap: if released near the right edge of Aviation Intel,
+            // pop back into the docked position. The snap zone is a vertical
+            // band ~120px wide just outside the parent panel's right edge.
+            const rect = aviationPanelDOMRef.current?.getBoundingClientRect();
+            if (!rect) return;
+            const dx = p.x - (rect.right + 8);   // 8px target gap
+            const verticallyOverlaps = p.y < rect.bottom + 60 && p.y > rect.top - 60;
+            if (Math.abs(dx) < 120 && verticallyOverlaps) {
+              setContactsDocked(true);
+            }
+          }}
+        >
+          <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
+            <div style={{ padding: "8px 14px 6px", flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+              <div style={{ fontSize: 8, letterSpacing: "0.18em", color: "rgba(0,255,255,0.4)", textTransform: "uppercase" }}>AVIATION FEED</div>
+              <div style={{ fontSize: 8, color: "rgba(0,255,255,0.3)" }}>{displayedAircraft.length} / {aircraft.length}</div>
+            </div>
+            {error && (
+              <div style={{ margin: "0 14px 8px", padding: "5px 8px", background: "rgba(255,50,50,0.07)", border: "1px solid rgba(255,50,50,0.2)", borderRadius: 2, fontSize: 9, color: "rgba(255,100,100,0.7)", letterSpacing: "0.1em" }}>
+                ⚠ {error}
+              </div>
+            )}
+            <div className="glow-scroll" style={{ flex: 1, overflowY: "auto", padding: "0 14px 10px", display: "flex", flexDirection: "column", gap: 3, minHeight: 0 }}>
+              {displayedAircraft.map((a) => {
+                const isSelected = selectedAircraft?.hex === a.hex;
+                return (
+                  <div
+                    key={a.hex}
+                    onClick={() => handleSelectAircraft(a)}
+                    style={{
+                      padding: "7px 9px", borderRadius: 2, cursor: "pointer", transition: "all 0.15s",
+                      background: isSelected ? (isMil ? "rgba(255,107,53,0.08)" : "rgba(0,255,255,0.07)") : "rgba(0,255,255,0.015)",
+                      border: `1px solid ${isSelected ? (isMil ? "rgba(255,107,53,0.4)" : "rgba(0,255,255,0.4)") : "rgba(0,255,255,0.07)"}`,
+                    }}
+                  >
+                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 6 }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
+                        <AircraftSVG isMil={isMil} size={9} />
+                        <span style={{ fontSize: 11, fontWeight: 600, letterSpacing: "0.07em", color: accentColor, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                          {formatCallsign(a)}
+                        </span>
+                      </div>
+                      {a.alt_baro !== undefined && (
+                        <span style={{ fontSize: 8, color: "rgba(0,255,255,0.35)", flexShrink: 0 }}>{formatAlt(a.alt_baro)}</span>
+                      )}
+                    </div>
+                    {a.t && <div style={{ fontSize: 8, color: "rgba(0,255,255,0.25)", marginTop: 2 }}>{a.t}</div>}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
         </FloatingPanel>
       )}
 
@@ -1807,6 +1942,24 @@ export default function WorldviewMap() {
         ::-webkit-scrollbar { width: 3px; }
         ::-webkit-scrollbar-track { background: rgba(0,255,255,0.03); }
         ::-webkit-scrollbar-thumb { background: rgba(0,255,255,0.2); border-radius: 2px; }
+
+        /* Glowing cyan scrollbar — applied to .glow-scroll containers
+           (contacts list, overwatch list). Webkit + Firefox variants. */
+        .glow-scroll::-webkit-scrollbar { width: 6px; }
+        .glow-scroll::-webkit-scrollbar-track {
+          background: rgba(0,255,255,0.05);
+          border-left: 1px solid rgba(0,255,255,0.08);
+        }
+        .glow-scroll::-webkit-scrollbar-thumb {
+          background: linear-gradient(180deg, rgba(0,255,255,0.65), rgba(0,255,255,0.35));
+          border-radius: 3px;
+          box-shadow: 0 0 6px rgba(0,255,255,0.55), inset 0 0 4px rgba(255,255,255,0.18);
+        }
+        .glow-scroll::-webkit-scrollbar-thumb:hover {
+          background: linear-gradient(180deg, rgba(125,249,255,0.95), rgba(0,255,255,0.55));
+          box-shadow: 0 0 10px rgba(0,255,255,0.95), inset 0 0 4px rgba(255,255,255,0.3);
+        }
+        .glow-scroll { scrollbar-width: thin; scrollbar-color: rgba(0,255,255,0.55) rgba(0,255,255,0.05); }
         .maplibregl-ctrl-attrib { background: rgba(0,0,0,0.7) !important; color: rgba(0,255,255,0.4) !important; font-size: 9px !important; }
         .maplibregl-ctrl-attrib a { color: rgba(0,255,255,0.4) !important; }
         .maplibregl-ctrl-group { background: rgba(2,4,8,0.9) !important; border: 1px solid rgba(0,255,255,0.18) !important; border-radius: 2px !important; }
