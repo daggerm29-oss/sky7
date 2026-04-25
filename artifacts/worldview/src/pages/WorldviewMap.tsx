@@ -1310,6 +1310,12 @@ export default function WorldviewMap() {
 
           <Divider />
 
+          {/* SCROLLABLE BODY — wraps every control section so the panel never
+              clips when SELECTED TARGET (or other dynamic sections) push the
+              total height past the viewport cap. The HEADER above and the
+              status FOOTER below stay pinned. */}
+          <div className="glow-scroll" style={{ flex: 1, minHeight: 0, overflowY: "auto", display: "flex", flexDirection: "column" }}>
+
           {/* COUNTERS */}
           <div style={{ padding: "0 16px 10px", flexShrink: 0 }}>
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
@@ -1733,7 +1739,10 @@ export default function WorldviewMap() {
                 </div>
               )}
 
-              <div className="glow-scroll" style={{ flex: 1, overflowY: "auto", padding: "0 16px 8px", display: "flex", flexDirection: "column", gap: 3 }}>
+              {/* No internal overflow:auto here — the surrounding scroll
+                  wrapper handles overflow for the whole panel body, and we
+                  don't want nested scrollbars. */}
+              <div style={{ padding: "0 16px 8px", display: "flex", flexDirection: "column", gap: 3 }}>
                 {displayedAircraft.map((a) => {
                   const isSelected = selectedAircraft?.hex === a.hex;
                   return (
@@ -1785,6 +1794,9 @@ export default function WorldviewMap() {
               >⇲ DOCK CONTACTS</button>
             </div>
           )}
+
+          </div>
+          {/* /SCROLLABLE BODY */}
 
           <div style={{ height: 1, background: "linear-gradient(90deg,transparent,rgba(0,255,255,0.2),transparent)", margin: "0 16px" }} />
           <div style={{ padding: "6px 16px", flexShrink: 0, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
