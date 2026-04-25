@@ -1,0 +1,192 @@
+import { useEffect } from "react";
+import maplibregl from "maplibre-gl";
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Maritime radar contact. Mirrors the upstream `/api/radar` schema with only
+// the fields we actually consume. Extras (sog, cog, est_barrels, vessel_name)
+// are kept around so list-rendering UIs can display them later.
+// ──────────────────────────────────────────────────────────────────────────────
+export interface Ship {
+  mmsi: number;
+  vessel_name?: string;
+  lat: number;
+  lon: number;
+  sog?: number;
+  cog?: number;
+  last_updated?: number;
+  /** Upstream classification — TANKER / MILITARY / UNKNOWN. */
+  category: "TANKER" | "MILITARY" | "UNKNOWN" | string;
+  /** Upstream feed origin — AISSTREAM (global) / MARINETRAFFIC / FUSED_INTEL. */
+  source: "AISSTREAM" | "MARINETRAFFIC" | "FUSED_INTEL" | string;
+  dwt?: number;
+  est_barrels?: number;
+}
+
+export interface ShipFilters {
+  /** Show MILITARY-classified contacts (rendered blue). */
+  military: boolean;
+  /** Show TANKER-classified contacts (rendered red). */
+  tankers: boolean;
+  /** Show AISSTREAM (global civilian AIS) contacts (rendered white). */
+  globalAis: boolean;
+}
+
+interface Props {
+  map: maplibregl.Map | null;
+  mapLoaded: boolean;
+  ships: Ship[];
+  filters: ShipFilters;
+  /** Master visibility — when the Maritime panel is closed we still keep the
+   *  layer mounted (cheap) but flip the layout visibility off so the points
+   *  disappear from the globe without tearing down sources/layers. */
+  visible: boolean;
+}
+
+// Render colours per the spec.
+const C_TANKER  = "#ff3b30"; // red
+const C_MIL     = "#3a8dff"; // blue
+const C_AIS     = "#ffffff"; // white (AISSTREAM, global)
+const C_FALLBACK = "rgba(180,200,210,0.65)";
+
+/**
+ * Bucket a ship into one of the four render categories. Order matters:
+ *   1. AISSTREAM source overrides everything (global civilian feed = white)
+ *   2. TANKER category (regional fused intel)
+ *   3. MILITARY category (regional fused intel)
+ *   4. anything else falls back to a muted neutral colour.
+ */
+function classifyShip(s: Ship): { color: string; bucket: "ais" | "tanker" | "mil" | "other" } {
+  if (s.source === "AISSTREAM")  return { color: C_AIS,    bucket: "ais"   };
+  if (s.category === "TANKER")   return { color: C_TANKER, bucket: "tanker"};
+  if (s.category === "MILITARY") return { color: C_MIL,    bucket: "mil"   };
+  return { color: C_FALLBACK, bucket: "other" };
+}
+
+/** Build a GeoJSON FeatureCollection from the filtered ship list. Each
+ *  feature carries pre-resolved color + bucket as feature properties so the
+ *  MapLibre paint expressions stay trivial. */
+function buildGeoJson(ships: Ship[], filters: ShipFilters): GeoJSON.FeatureCollection {
+  const features: GeoJSON.Feature[] = [];
+  for (const s of ships) {
+    if (typeof s.lat !== "number" || typeof s.lon !== "number") continue;
+    const { color, bucket } = classifyShip(s);
+    if (bucket === "ais"    && !filters.globalAis) continue;
+    if (bucket === "tanker" && !filters.tankers)   continue;
+    if (bucket === "mil"    && !filters.military)  continue;
+    // 'other' bucket: hide unless any filter is on (treat as ambient noise).
+    if (bucket === "other" && !(filters.globalAis || filters.tankers || filters.military)) continue;
+
+    features.push({
+      type: "Feature",
+      geometry: { type: "Point", coordinates: [s.lon, s.lat] },
+      properties: {
+        mmsi: s.mmsi,
+        name: s.vessel_name ?? "",
+        color,
+        bucket,
+        category: s.category,
+        source: s.source,
+      },
+    });
+  }
+  return { type: "FeatureCollection", features };
+}
+
+/**
+ * Renders maritime radar contacts as MapLibre circle layers. Same architecture
+ * as SatelliteLayer but simpler — ships sit at sea level so we don't need any
+ * altitude projection or canvas overlay. A halo layer underneath each dot
+ * gives the points a subtle glow so military / tanker contacts read clearly
+ * over both ocean and land basemap tiles.
+ */
+export function ShipsLayer({ map, mapLoaded, ships, filters, visible }: Props) {
+  // ── source / layer setup (once per map instance) ────────────────────────
+  useEffect(() => {
+    if (!map || !mapLoaded) return;
+
+    if (!map.getSource("ships")) {
+      map.addSource("ships", {
+        type: "geojson",
+        data: { type: "FeatureCollection", features: [] },
+      });
+    }
+
+    if (!map.getLayer("ships-halo")) {
+      map.addLayer({
+        id: "ships-halo",
+        type: "circle",
+        source: "ships",
+        paint: {
+          "circle-radius": [
+            "match", ["get", "bucket"],
+            "tanker", 6.5,
+            "mil",    6.5,
+            "ais",    3.5,
+            3.5,
+          ],
+          "circle-color": ["get", "color"],
+          "circle-opacity": 0.18,
+          "circle-blur": 0.6,
+        },
+      });
+    }
+
+    if (!map.getLayer("ships-dot")) {
+      map.addLayer({
+        id: "ships-dot",
+        type: "circle",
+        source: "ships",
+        paint: {
+          "circle-radius": [
+            "match", ["get", "bucket"],
+            "tanker", 3.2,
+            "mil",    3.2,
+            "ais",    1.6,
+            1.6,
+          ],
+          "circle-color": ["get", "color"],
+          "circle-opacity": [
+            "match", ["get", "bucket"],
+            "ais", 0.75,
+            0.95,
+          ],
+          "circle-stroke-width": [
+            "match", ["get", "bucket"],
+            "tanker", 0.6,
+            "mil",    0.6,
+            0,
+          ],
+          "circle-stroke-color": "rgba(0,0,0,0.55)",
+        },
+      });
+    }
+
+    return () => {
+      // Cleanup on unmount — strict-mode double-invoke safe because each
+      // operation is guarded by an existence check.
+      for (const id of ["ships-dot", "ships-halo"]) {
+        if (map.getLayer(id)) map.removeLayer(id);
+      }
+      if (map.getSource("ships")) map.removeSource("ships");
+    };
+  }, [map, mapLoaded]);
+
+  // ── data updates (whenever ships, filters, or visibility change) ────────
+  useEffect(() => {
+    if (!map || !mapLoaded) return;
+    const src = map.getSource("ships") as maplibregl.GeoJSONSource | undefined;
+    if (!src) return;
+    src.setData(buildGeoJson(ships, filters));
+  }, [map, mapLoaded, ships, filters]);
+
+  // ── visibility toggle (panel closed ⇒ layer hidden, sources retained) ──
+  useEffect(() => {
+    if (!map || !mapLoaded) return;
+    const v = visible ? "visible" : "none";
+    for (const id of ["ships-dot", "ships-halo"]) {
+      if (map.getLayer(id)) map.setLayoutProperty(id, "visibility", v);
+    }
+  }, [map, mapLoaded, visible]);
+
+  return null;
+}

@@ -2,7 +2,9 @@ import { useEffect, useRef, useState, useCallback, useMemo } from "react";
 import maplibregl from "maplibre-gl";
 import { CesiumFollowCam } from "../components/CesiumFollowCam";
 import { SatelliteLayer, type SatPosition } from "../components/SatelliteLayer";
+import { ShipsLayer, type Ship, type ShipFilters } from "../components/ShipsLayer";
 import { FloatingPanel } from "../components/FloatingPanel";
+import { MaritimePanel } from "../components/MaritimePanel";
 import { MasterToolbar, AviationIcon, MaritimeIcon } from "../components/MasterToolbar";
 
 // Active AO radius (km): satellites within this distance from the theater
@@ -464,6 +466,18 @@ export default function WorldviewMap() {
   // the Aviation Intel panel re-docks it (magnetic snap).
   const [contactsDocked, setContactsDocked] = useState(true);
   const aviationPanelDOMRef = useRef<HTMLDivElement | null>(null);
+
+  // ── MARITIME INTEL ──────────────────────────────────────────────────────
+  // Floating panel + ShipsLayer (5s polling). Filters control globe rendering
+  // only; metric counts always reflect the unfiltered tick.
+  const [maritimePanelOpen, setMaritimePanelOpen] = useState(false);
+  const [ships, setShips] = useState<Ship[]>([]);
+  const [shipsLoading, setShipsLoading] = useState(false);
+  const [shipsError, setShipsError] = useState<string | null>(null);
+  const [shipsLastUpdate, setShipsLastUpdate] = useState<Date | null>(null);
+  const [shipFilters, setShipFilters] = useState<ShipFilters>({
+    military: true, tankers: true, globalAis: true,
+  });
   // Multi-select: a Set of NORAD IDs currently flagged for overwatch.
   const [selectedSatIds, setSelectedSatIds] = useState<Set<string>>(new Set());
   // Latest position snapshot keyed by NORAD ID — feeds the overwatch panel
@@ -790,6 +804,33 @@ export default function WorldviewMap() {
     const interval = setInterval(() => fetchData(mode, areaMode, radius), 1000);
     return () => clearInterval(interval);
   }, [mode, areaMode, radius, fetchData]);
+
+  // ── MARITIME radar polling — 5s ticks against the api-server proxy. We
+  //    poll continuously (not just when the panel is open) so the dots on
+  //    the globe stay live whenever the toolbar is showing maritime active.
+  useEffect(() => {
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        setShipsLoading(true);
+        const res = await fetch(`${base}/api/proxy/ships`);
+        if (!res.ok) throw new Error(`ships ${res.status}`);
+        const data = (await res.json()) as Ship[];
+        if (cancelled) return;
+        setShips(Array.isArray(data) ? data : []);
+        setShipsError(null);
+        setShipsLastUpdate(new Date());
+      } catch (err) {
+        if (cancelled) return;
+        setShipsError(err instanceof Error ? err.message : "ships fetch failed");
+      } finally {
+        if (!cancelled) setShipsLoading(false);
+      }
+    };
+    tick();
+    const id = setInterval(tick, 5000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [base]);
 
   useEffect(() => {
     if (!mapLoadedState) return;
@@ -1192,6 +1233,17 @@ export default function WorldviewMap() {
 
       {webglError && <WebGLFallback />}
 
+      {/* MARITIME RADAR — sea-level circle overlays. Polled continuously and
+          only made visible when the maritime panel is open, so the cyan dots
+          on the globe match the toolbar's open/closed state. */}
+      <ShipsLayer
+        map={mapRef.current}
+        mapLoaded={mapLoadedState}
+        ships={ships}
+        filters={shipFilters}
+        visible={maritimePanelOpen}
+      />
+
       {/* SATELLITE INTEL — propagates TLEs and overlays satellites on the globe */}
       {viewMode === "3d" && satIntelOn && (
         <SatelliteLayer
@@ -1272,9 +1324,10 @@ export default function WorldviewMap() {
           },
           {
             id: "maritime",
-            label: "Maritime Intel (coming soon)",
+            label: "Maritime Intel",
             icon: MaritimeIcon,
-            disabled: true,
+            active: maritimePanelOpen,
+            onClick: () => setMaritimePanelOpen((o) => !o),
           },
         ]}
       />
@@ -1810,6 +1863,19 @@ export default function WorldviewMap() {
           </div>
         </div>
         </FloatingPanel>
+      )}
+
+      {/* MARITIME INTEL — floating panel: filters, live metrics, regional analytics */}
+      {maritimePanelOpen && (
+        <MaritimePanel
+          ships={ships}
+          filters={shipFilters}
+          onFiltersChange={setShipFilters}
+          loading={shipsLoading}
+          error={shipsError}
+          lastUpdate={shipsLastUpdate}
+          onClose={() => setMaritimePanelOpen(false)}
+        />
       )}
 
       {/* DETACHED CONTACTS PANEL — appears when the user pops contacts out of

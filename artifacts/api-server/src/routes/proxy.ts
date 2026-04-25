@@ -161,4 +161,45 @@ router.get("/proxy/region", async (req, res) => {
   }
 });
 
+// ---------- Maritime / ships proxy ----------
+//
+// Mirrors the FUSED_INTEL/AISSTREAM/MARINETRAFFIC ships radar feed so the
+// browser can poll without CORS or upstream rate-limit headaches. We add a
+// short in-memory cache because the upstream service is on a free-tier host
+// that occasionally cold-starts and takes >5s to respond, and the polling
+// interval (5s) would multiply that load.
+
+const SHIPS_URL = "https://ships-faf8.onrender.com/api/radar";
+interface ShipsCacheEntry { body: unknown; fetchedAt: number; }
+let shipsCache: ShipsCacheEntry | null = null;
+const SHIPS_TTL_MS = 4_000; // <5s polling interval, slightly under
+
+router.get("/proxy/ships", async (req, res) => {
+  if (shipsCache && Date.now() - shipsCache.fetchedAt < SHIPS_TTL_MS) {
+    res.json(shipsCache.body);
+    return;
+  }
+  try {
+    const upstream = await fetch(SHIPS_URL, {
+      headers: {
+        "Accept": "application/json",
+        "User-Agent": "WORLDVIEW/1.0",
+      },
+      signal: AbortSignal.timeout(20000),
+    });
+    if (!upstream.ok) throw new Error(`ships ${upstream.status}`);
+    const body = await upstream.json();
+    shipsCache = { body, fetchedAt: Date.now() };
+    res.json(body);
+  } catch (err: unknown) {
+    req.log.error({ err }, "ships proxy error");
+    if (shipsCache) {
+      // Serve stale rather than failing the radar tick.
+      res.json(shipsCache.body);
+      return;
+    }
+    res.status(502).json({ error: "upstream error" });
+  }
+});
+
 export default router;
