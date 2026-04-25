@@ -2,6 +2,8 @@ import { useEffect, useRef, useState, useCallback, useMemo } from "react";
 import maplibregl from "maplibre-gl";
 import { CesiumFollowCam } from "../components/CesiumFollowCam";
 import { SatelliteLayer, type SatPosition } from "../components/SatelliteLayer";
+import { FloatingPanel } from "../components/FloatingPanel";
+import { MasterToolbar, AviationIcon, MaritimeIcon } from "../components/MasterToolbar";
 
 // Active AO radius (km): satellites within this distance from the theater
 // centroid are flagged as "active overwatch" assets.
@@ -451,6 +453,12 @@ export default function WorldviewMap() {
   const [mapLoadedState, setMapLoadedState] = useState(false);
   const [trackedHex, setTrackedHex] = useState<string | null>(null);
   const [satIntelOn, setSatIntelOn] = useState(false);
+
+  // ── MODULAR WINDOW SYSTEM ───────────────────────────────────────────────
+  // Each data panel is a draggable, minimizable floating window. The thin
+  // left toolbar toggles them open/closed. New panels (Maritime Intel, etc.)
+  // get added here as more state slots.
+  const [aviationPanelOpen, setAviationPanelOpen] = useState(true);
   // Multi-select: a Set of NORAD IDs currently flagged for overwatch.
   const [selectedSatIds, setSelectedSatIds] = useState<Set<string>>(new Set());
   // Latest position snapshot keyed by NORAD ID — feeds the overwatch panel
@@ -1247,13 +1255,40 @@ export default function WorldviewMap() {
         <div style={{ position: "absolute", inset: 0, pointerEvents: "none", background: "radial-gradient(ellipse at center, transparent 50%, rgba(0,0,5,0.65) 100%)", zIndex: 3 }} />
       )}
 
-      {/* LEFT PANEL */}
-      <div style={{ position: "absolute", left: 0, top: 0, bottom: 0, width: 300, zIndex: 10, display: "flex", flexDirection: "column" }}>
+      {/* MASTER TOOLBAR — thin permanent left palette controlling every floating panel */}
+      <MasterToolbar
+        items={[
+          {
+            id: "aviation",
+            label: "Aviation Intel",
+            icon: AviationIcon,
+            active: aviationPanelOpen,
+            onClick: () => setAviationPanelOpen((o) => !o),
+          },
+          {
+            id: "maritime",
+            label: "Maritime Intel (coming soon)",
+            icon: MaritimeIcon,
+            disabled: true,
+          },
+        ]}
+      />
+
+      {/* AVIATION INTEL — the original left HUD, now wrapped in a draggable window.
+          Inner content is preserved verbatim so all existing data + logic still wire
+          through. The outer chrome (background, border, shadow) is provided by the
+          FloatingPanel; the inner styled wrapper drops its old chrome to avoid
+          double-framing while keeping the flex layout the children depend on. */}
+      {aviationPanelOpen && (
+        <FloatingPanel
+          title="AVIATION INTEL"
+          initialX={54}
+          initialY={14}
+          width={300}
+          onClose={() => setAviationPanelOpen(false)}
+        >
         <div style={{
           height: "100%", display: "flex", flexDirection: "column", overflow: "hidden", position: "relative",
-          background: "rgba(2,4,8,0.9)", backdropFilter: "blur(20px)", WebkitBackdropFilter: "blur(20px)",
-          borderRight: "1px solid rgba(0,255,255,0.15)",
-          boxShadow: "inset -1px 0 0 rgba(0,255,255,0.05), 4px 0 30px rgba(0,0,0,0.6)"
         }}>
           <div style={{ position: "absolute", top: 0, left: 0, right: 0, height: 2, background: "linear-gradient(90deg,transparent,rgba(0,255,255,0.6),transparent)", animation: "scan 4s linear infinite", zIndex: 2 }} />
 
@@ -1712,7 +1747,8 @@ export default function WorldviewMap() {
             </div>
           </div>
         </div>
-      </div>
+        </FloatingPanel>
+      )}
 
       {/* FLOATING OVERWATCH LIST — multi-target sat selection (3D + SAT INTEL) */}
       {satIntelOn && viewMode === "3d" && (
