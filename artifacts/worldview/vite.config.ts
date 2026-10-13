@@ -1,30 +1,37 @@
-import { defineConfig } from "vite";
+import { defineConfig, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import path from "path";
-import runtimeErrorOverlay from "@replit/vite-plugin-runtime-error-modal";
 import cesium from "vite-plugin-cesium";
+import express from "express";
+import cors from "cors";
+import proxyRouter from "../api-server/src/routes/proxy";
+import healthRouter from "../api-server/src/routes/health";
 
-const rawPort = process.env.PORT;
+const port = Number(process.env.PORT) || 3000;
+const basePath = process.env.BASE_PATH || "/";
 
-if (!rawPort) {
-  throw new Error(
-    "PORT environment variable is required but was not provided.",
-  );
-}
+function apiProxyPlugin(): Plugin {
+  const mountApi = (server: any) => {
+    const apiApp = express();
+    apiApp.use(cors());
+    apiApp.use(express.json());
+    const router = express.Router();
+    router.use(healthRouter);
+    router.use(proxyRouter);
+    apiApp.use("/api", router);
+    server.middlewares.use(apiApp);
+  };
 
-const port = Number(rawPort);
-
-if (Number.isNaN(port) || port <= 0) {
-  throw new Error(`Invalid PORT value: "${rawPort}"`);
-}
-
-const basePath = process.env.BASE_PATH;
-
-if (!basePath) {
-  throw new Error(
-    "BASE_PATH environment variable is required but was not provided.",
-  );
+  return {
+    name: "api-proxy-plugin",
+    configureServer(server) {
+      mountApi(server);
+    },
+    configurePreviewServer(server) {
+      mountApi(server);
+    },
+  };
 }
 
 export default defineConfig({
@@ -32,22 +39,15 @@ export default defineConfig({
   plugins: [
     react(),
     tailwindcss(),
-    runtimeErrorOverlay(),
-    cesium(),
-    ...(process.env.NODE_ENV !== "production" &&
-    process.env.REPL_ID !== undefined
-      ? [
-          await import("@replit/vite-plugin-cartographer").then((m) =>
-            m.cartographer({
-              root: path.resolve(import.meta.dirname, ".."),
-            }),
-          ),
-          await import("@replit/vite-plugin-dev-banner").then((m) =>
-            m.devBanner(),
-          ),
-        ]
-      : []),
+    cesium({
+      cesiumBuildRootPath: path.resolve(import.meta.dirname, "../../node_modules/cesium/Build"),
+      cesiumBuildPath: path.resolve(import.meta.dirname, "../../node_modules/cesium/Build/Cesium/"),
+    }),
+    apiProxyPlugin(),
   ],
+  worker: {
+    format: "es",
+  },
   resolve: {
     alias: {
       "@": path.resolve(import.meta.dirname, "src"),
@@ -57,19 +57,13 @@ export default defineConfig({
   },
   root: path.resolve(import.meta.dirname),
   build: {
-    outDir: path.resolve(import.meta.dirname, "dist/public"),
+    outDir: path.resolve(import.meta.dirname, "../../dist"),
     emptyOutDir: true,
   },
   server: {
     port,
     host: "0.0.0.0",
     allowedHosts: true,
-    proxy: {
-      "/api": {
-        target: "http://localhost:8080",
-        changeOrigin: true,
-      },
-    },
     fs: {
       strict: true,
       deny: ["**/.*"],

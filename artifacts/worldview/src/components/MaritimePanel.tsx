@@ -1,6 +1,7 @@
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, ResponsiveContainer } from "recharts";
+import { useState, useEffect } from "react";
+import { BarChart, Bar, XAxis, YAxis, CartesianGrid, ResponsiveContainer, Tooltip } from "recharts";
 import { FloatingPanel } from "./FloatingPanel";
-import type { Ship, ShipFilters } from "./ShipsLayer";
+import { type Ship, type ShipFilters, isAisGapCandidate } from "./ShipsLayer";
 
 interface Props {
   ships: Ship[];
@@ -12,19 +13,51 @@ interface Props {
   onClose: () => void;
 }
 
+interface OilDailyEntry {
+  day: string;
+  tankers: number;
+  barrels: number;
+}
+
+interface OilDailyResponse {
+  days: OilDailyEntry[];
+  avg_barrels_per_day_last_7d: number;
+  note?: string;
+}
+
+interface OilLiveResponse {
+  active_tankers: number;
+  total_barrels_in_transit?: number;
+  capacity_barrels_in_region: number;
+  inbound_tankers: number;
+  inbound_barrels_to_india: number;
+  arrived_last_24h: {
+    tankers: number;
+    barrels: number;
+  };
+  note?: string;
+}
+
 // Render colours mirror ShipsLayer for visual consistency between the panel
 // chips, the metric blocks, and the dots on the globe.
 const C_TANKER = "#ff3b30";
 const C_MIL    = "#3a8dff";
 const C_AIS    = "#ffffff";
+const C_GAP    = "#ff9500";
+const C_CYAN   = "#00ffff";
+
+function formatCompactBarrels(val: number): string {
+  if (val >= 1_000_000_000) return (val / 1_000_000_000).toFixed(1) + "B";
+  if (val >= 1_000_000) return (val / 1_000_000).toFixed(1) + "M";
+  if (val >= 1_000) return (val / 1_000).toFixed(1) + "K";
+  return val.toLocaleString();
+}
 
 /**
  * MARITIME INTEL — floating data panel with three sections:
- *   1. FILTERS — toggle Military / Tanker / Global AIS classes on the globe.
+ *   1. FILTERS — toggle Military / Tanker / Global AIS / AIS Gap classes on the globe.
  *   2. LIVE METRICS — counts derived from the latest /api/proxy/ships tick.
- *   3. REGIONAL ANALYTICS — placeholder Recharts canvases for Hormuz transit
- *      volume and Indian-subcontinent unloading. They render axes + grid
- *      today; pipe historical data into the `data` props later.
+ *   3. OIL ANALYTICS — India crude arrivals bar chart & regional tanker capacity readouts.
  *
  * Pinned header + scrollable body, matching the Aviation Intel layout so the
  * tactical aesthetic stays consistent across the windowing system.
@@ -43,18 +76,67 @@ export function MaritimePanel({
   let activeTankers = 0;
   let activeMilitary = 0;
   let activeGlobal = 0;
+  let activeGaps = 0;
   for (const s of ships) {
-    if (s.source === "AISSTREAM") activeGlobal++;
+    if (isAisGapCandidate(s)) activeGaps++;
+    else if (s.source === "AISSTREAM") activeGlobal++;
     else if (s.category === "TANKER") activeTankers++;
     else if (s.category === "MILITARY") activeMilitary++;
   }
+
+  // Oil analytics state — polled gently every 60s without localStorage
+  const [oilLive, setOilLive] = useState<OilLiveResponse | null>(null);
+  const [oilDaily, setOilDaily] = useState<OilDailyResponse | null>(null);
+  const [oilLoading, setOilLoading] = useState<boolean>(true);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function fetchOilData() {
+      try {
+        const [liveRes, dailyRes] = await Promise.allSettled([
+          fetch("/api/proxy/oil/live"),
+          fetch("/api/proxy/oil/daily"),
+        ]);
+
+        if (cancelled) return;
+
+        if (liveRes.status === "fulfilled" && liveRes.value.ok) {
+          const liveData = (await liveRes.value.json()) as OilLiveResponse;
+          if (!cancelled) setOilLive(liveData);
+        }
+
+        if (dailyRes.status === "fulfilled" && dailyRes.value.ok) {
+          const dailyData = (await dailyRes.value.json()) as OilDailyResponse;
+          if (!cancelled) setOilDaily(dailyData);
+        }
+      } catch {
+        // Retain stale data on network glitch
+      } finally {
+        if (!cancelled) setOilLoading(false);
+      }
+    }
+
+    fetchOilData();
+    const interval = setInterval(fetchOilData, 60_000);
+
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, []);
+
+  const estimatesTooltip =
+    oilLive?.note ||
+    oilDaily?.note ||
+    "Estimates based on tanker DWT and reported AIS destination. May reflect coverage or latency limits.";
 
   return (
     <FloatingPanel
       title="MARITIME INTEL"
       initialX={54}
       initialY={420}
-      width={300}
+      width={320}
       onClose={onClose}
     >
       <div style={{
@@ -119,16 +201,29 @@ export function MaritimePanel({
               checked={filters.globalAis}
               onChange={(v) => onFiltersChange({ ...filters, globalAis: v })}
             />
+            <FilterToggle
+              label="AIS GAP CANDIDATES"
+              dotColor={C_GAP}
+              checked={filters.aisGap}
+              onChange={(v) => onFiltersChange({ ...filters, aisGap: v })}
+              tooltip="Ships that stopped transmitting AIS for 30+ min. May also be a coverage gap."
+            />
           </Section>
 
           <SectionDivider />
 
           {/* ── LIVE METRICS ───────────────────────────────────────────── */}
           <Section label="LIVE METRICS">
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 6 }}>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
               <MetricBlock label="TANKERS"  value={activeTankers}  color={C_TANKER} />
               <MetricBlock label="MILITARY" value={activeMilitary} color={C_MIL} />
               <MetricBlock label="GLOBAL"   value={activeGlobal}   color={C_AIS} />
+              <MetricBlock
+                label="AIS GAP CANDIDATES"
+                value={activeGaps}
+                color={C_GAP}
+                tooltip="Ships that stopped transmitting AIS for 30+ min. May also be a coverage gap."
+              />
             </div>
             {error && (
               <div style={{
@@ -143,11 +238,137 @@ export function MaritimePanel({
 
           <SectionDivider />
 
-          {/* ── REGIONAL ANALYTICS ─────────────────────────────────────── */}
-          <Section label="REGIONAL ANALYTICS">
-            <ChartFrame title="HORMUZ TRANSIT VOLUME" subtitle="vessels / hr" />
+          {/* ── OIL ANALYTICS ─────────────────────────────────────────── */}
+          <Section
+            label="OIL ANALYTICS"
+            headerRight={
+              <span
+                title={estimatesTooltip}
+                style={{
+                  fontSize: 8, color: "rgba(0,255,255,0.5)",
+                  border: "1px solid rgba(0,255,255,0.3)",
+                  borderRadius: "50%", width: 13, height: 13,
+                  display: "inline-flex", alignItems: "center", justifyContent: "center",
+                  cursor: "help",
+                }}
+              >
+                ℹ
+              </span>
+            }
+          >
+            {/* Chart 1: India crude arrivals */}
+            <IndiaCrudeArrivalsChart
+              daily={oilDaily}
+              loading={oilLoading && !oilDaily}
+              tooltipText={estimatesTooltip}
+            />
+
             <div style={{ height: 8 }} />
-            <ChartFrame title="INDIAN SUBCONTINENT UNLOADING" subtitle="dwt-kt / day" />
+
+            {/* Stats row from /oil/live: on the way to India & arrived last 24h */}
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, marginBottom: 8 }}>
+              <div style={{
+                padding: 8,
+                background: "rgba(0,255,255,0.03)",
+                border: "1px solid rgba(0,255,255,0.12)",
+                borderRadius: 2,
+              }}>
+                <div style={{
+                  fontSize: 7, letterSpacing: "0.12em",
+                  color: "rgba(0,255,255,0.5)", textTransform: "uppercase",
+                  marginBottom: 3,
+                }}>
+                  ON THE WAY TO INDIA
+                </div>
+                <div style={{
+                  fontSize: 14, fontWeight: 700, color: "#ff3b30",
+                  fontFamily: "'Share Tech Mono','Courier New',monospace",
+                  lineHeight: 1.1,
+                }}>
+                  {oilLive ? `${oilLive.inbound_tankers} tankers` : (oilLoading ? "..." : "Collecting data...")}
+                </div>
+                <div style={{
+                  fontSize: 9, color: "rgba(255,59,48,0.75)",
+                  fontFamily: "'Share Tech Mono','Courier New',monospace",
+                  marginTop: 2,
+                }}>
+                  {oilLive ? `~${formatCompactBarrels(oilLive.inbound_barrels_to_india)} bbl` : ""}
+                </div>
+              </div>
+
+              <div style={{
+                padding: 8,
+                background: "rgba(0,255,255,0.03)",
+                border: "1px solid rgba(0,255,255,0.12)",
+                borderRadius: 2,
+              }}>
+                <div style={{
+                  fontSize: 7, letterSpacing: "0.12em",
+                  color: "rgba(0,255,255,0.5)", textTransform: "uppercase",
+                  marginBottom: 3,
+                }}>
+                  ARRIVED LAST 24H
+                </div>
+                <div style={{
+                  fontSize: 14, fontWeight: 700, color: "#00ffff",
+                  fontFamily: "'Share Tech Mono','Courier New',monospace",
+                  lineHeight: 1.1,
+                }}>
+                  {oilLive ? `${oilLive.arrived_last_24h.tankers} tankers` : (oilLoading ? "..." : "Collecting data...")}
+                </div>
+                <div style={{
+                  fontSize: 9, color: "rgba(0,255,255,0.7)",
+                  fontFamily: "'Share Tech Mono','Courier New',monospace",
+                  marginTop: 2,
+                }}>
+                  {oilLive ? `~${formatCompactBarrels(oilLive.arrived_last_24h.barrels)} bbl` : ""}
+                </div>
+              </div>
+            </div>
+
+            {/* Regional Tanker Capacity banner: Strictly labelled "Tanker capacity in region (not imports)" */}
+            <div style={{
+              padding: "7px 9px",
+              background: "rgba(0,255,255,0.02)",
+              border: "1px solid rgba(0,255,255,0.1)",
+              borderRadius: 2,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+            }}>
+              <div>
+                <div style={{
+                  fontSize: 7, letterSpacing: "0.12em",
+                  color: "rgba(0,255,255,0.5)", textTransform: "uppercase",
+                }}>
+                  Tanker capacity in region (not imports)
+                </div>
+                <div style={{
+                  fontSize: 11, fontWeight: 700, color: "rgba(255,255,255,0.85)",
+                  fontFamily: "'Share Tech Mono','Courier New',monospace",
+                  marginTop: 2,
+                }}>
+                  {oilLive ? (
+                    <span>
+                      {oilLive.active_tankers} tankers · ~{formatCompactBarrels(oilLive.capacity_barrels_in_region)} bbl
+                    </span>
+                  ) : (
+                    <span style={{ fontSize: 9, color: "rgba(0,255,255,0.35)" }}>
+                      {oilLoading ? "Loading..." : "Collecting data..."}
+                    </span>
+                  )}
+                </div>
+              </div>
+              <span
+                title={estimatesTooltip}
+                style={{
+                  fontSize: 8, color: "rgba(0,255,255,0.4)",
+                  cursor: "help",
+                }}
+              >
+                ℹ
+              </span>
+            </div>
           </Section>
         </div>
 
@@ -173,7 +394,7 @@ export function MaritimePanel({
               }} />
             )}
             <div style={{ fontSize: 8, color: "rgba(0,255,255,0.3)", letterSpacing: "0.1em" }}>
-              RADAR LIVE · 5s
+              RADAR LIVE · 5s · OIL 60s
             </div>
           </div>
         </div>
@@ -193,25 +414,39 @@ function SectionDivider() {
   );
 }
 
-function Section({ label, children }: { label: string; children: React.ReactNode }) {
+function Section({
+  label,
+  children,
+  headerRight,
+}: {
+  label: string;
+  children: React.ReactNode;
+  headerRight?: React.ReactNode;
+}) {
   return (
     <div style={{ padding: "10px 16px 12px" }}>
       <div style={{
-        fontSize: 8, letterSpacing: "0.2em",
-        color: "rgba(0,255,255,0.35)", textTransform: "uppercase",
+        display: "flex", alignItems: "center", justifyContent: "space-between",
         marginBottom: 8,
-      }}>{label}</div>
+      }}>
+        <div style={{
+          fontSize: 8, letterSpacing: "0.2em",
+          color: "rgba(0,255,255,0.35)", textTransform: "uppercase",
+        }}>{label}</div>
+        {headerRight}
+      </div>
       {children}
     </div>
   );
 }
 
 function FilterToggle({
-  label, dotColor, checked, onChange,
-}: { label: string; dotColor: string; checked: boolean; onChange: (v: boolean) => void }) {
+  label, dotColor, checked, onChange, tooltip,
+}: { label: string; dotColor: string; checked: boolean; onChange: (v: boolean) => void; tooltip?: string }) {
   return (
     <button
       type="button"
+      title={tooltip}
       onClick={() => onChange(!checked)}
       style={{
         width: "100%", padding: "7px 10px", marginBottom: 4,
@@ -251,19 +486,38 @@ function FilterToggle({
         fontSize: 10, letterSpacing: "0.18em",
         color: checked ? "#00ffff" : "rgba(0,255,255,0.55)",
         textTransform: "uppercase",
-      }}>{label}</span>
+        display: "inline-flex", alignItems: "center", gap: 5, flex: 1, justifyContent: "space-between",
+      }}>
+        <span>{label}</span>
+        {tooltip && (
+          <span
+            title={tooltip}
+            style={{
+              fontSize: 8, color: "rgba(0,255,255,0.5)", border: "1px solid rgba(0,255,255,0.3)",
+              borderRadius: "50%", width: 12, height: 12, display: "inline-flex",
+              alignItems: "center", justifyContent: "center", letterSpacing: 0,
+            }}
+          >
+            ?
+          </span>
+        )}
+      </span>
     </button>
   );
 }
 
-function MetricBlock({ label, value, color }: { label: string; value: number; color: string }) {
+function MetricBlock({ label, value, color, tooltip }: { label: string; value: number; color: string; tooltip?: string }) {
   return (
-    <div style={{
-      padding: 8,
-      background: "rgba(0,255,255,0.03)",
-      border: "1px solid rgba(0,255,255,0.1)",
-      borderRadius: 2,
-    }}>
+    <div
+      title={tooltip}
+      style={{
+        padding: 8,
+        background: "rgba(0,255,255,0.03)",
+        border: "1px solid rgba(0,255,255,0.1)",
+        borderRadius: 2,
+        cursor: tooltip ? "help" : "default",
+      }}
+    >
       <div style={{
         display: "flex", alignItems: "center", gap: 5, marginBottom: 4,
       }}>
@@ -272,9 +526,13 @@ function MetricBlock({ label, value, color }: { label: string; value: number; co
           background: color, boxShadow: `0 0 4px ${color}`,
         }} />
         <span style={{
-          fontSize: 7, letterSpacing: "0.15em",
+          fontSize: 7, letterSpacing: "0.12em",
           color: "rgba(0,255,255,0.45)", textTransform: "uppercase",
+          overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
         }}>{label}</span>
+        {tooltip && (
+          <span style={{ fontSize: 7, color: "rgba(0,255,255,0.4)", marginLeft: "auto" }}>ℹ</span>
+        )}
       </div>
       <div style={{
         color, fontSize: 16, fontWeight: 700, lineHeight: 1,
@@ -285,77 +543,169 @@ function MetricBlock({ label, value, color }: { label: string; value: number; co
   );
 }
 
-/** Empty styled chart frame — Recharts grid + axes with no data series.
- *  Replace the empty `data` constant with real points to populate. */
-function ChartFrame({ title, subtitle }: { title: string; subtitle: string }) {
-  // Empty placeholder data — keeps the axes scaled so the grid renders.
-  const data = [
-    { t: 0,  v: 0 },
-    { t: 24, v: 0 },
-  ];
+/**
+ * India crude arrivals (est. barrels/day)
+ * Bar chart of the days array from /oil/daily (x = day, y = barrels)
+ * Big number above showing avg_barrels_per_day_last_7d
+ */
+function IndiaCrudeArrivalsChart({
+  daily,
+  loading,
+  tooltipText,
+}: {
+  daily: OilDailyResponse | null;
+  loading: boolean;
+  tooltipText?: string;
+}) {
+  const days = daily?.days ?? [];
+  const hasHistory = days.some((d) => (d.barrels || 0) > 0 || (d.tankers || 0) > 0);
+
+  // Format chart data: short date MM/DD
+  const chartData = days.map((d) => {
+    const parts = d.day.split("-");
+    const shortLabel = parts.length === 3 ? `${parts[1]}/${parts[2]}` : d.day;
+    return {
+      day: shortLabel,
+      fullDay: d.day,
+      barrels: d.barrels,
+      tankers: d.tankers,
+    };
+  });
 
   return (
     <div style={{
-      padding: "8px 8px 4px",
+      padding: "8px 8px 6px",
       background: "rgba(0,255,255,0.03)",
       border: "1px solid rgba(0,255,255,0.12)",
       borderRadius: 2,
       position: "relative",
     }}>
+      {/* Header with Title and 7-day Average */}
       <div style={{
-        display: "flex", alignItems: "baseline", justifyContent: "space-between",
-        marginBottom: 4,
+        display: "flex", alignItems: "flex-start", justifyContent: "space-between",
+        marginBottom: 6,
       }}>
-        <span style={{
-          fontSize: 8, letterSpacing: "0.18em",
-          color: "rgba(0,255,255,0.7)", textTransform: "uppercase",
-        }}>{title}</span>
-        <span style={{
-          fontSize: 7, letterSpacing: "0.1em",
-          color: "rgba(0,255,255,0.3)", textTransform: "uppercase",
-        }}>{subtitle}</span>
-      </div>
-      <div style={{ width: "100%", height: 90, position: "relative" }}>
-        <ResponsiveContainer width="100%" height="100%">
-          <LineChart data={data} margin={{ top: 4, right: 6, left: -22, bottom: 0 }}>
-            <CartesianGrid stroke="rgba(0,255,255,0.08)" strokeDasharray="2 3" />
-            <XAxis
-              dataKey="t"
-              stroke="rgba(0,255,255,0.3)"
-              tick={{ fontSize: 7, fill: "rgba(0,255,255,0.4)" }}
-              tickLine={false}
-              axisLine={{ stroke: "rgba(0,255,255,0.2)" }}
-            />
-            <YAxis
-              stroke="rgba(0,255,255,0.3)"
-              tick={{ fontSize: 7, fill: "rgba(0,255,255,0.4)" }}
-              tickLine={false}
-              axisLine={{ stroke: "rgba(0,255,255,0.2)" }}
-              width={30}
-            />
-            <Line
-              type="monotone"
-              dataKey="v"
-              stroke="rgba(0,255,255,0.55)"
-              strokeWidth={1.2}
-              dot={false}
-              isAnimationActive={false}
-            />
-          </LineChart>
-        </ResponsiveContainer>
-        {/* "AWAITING TELEMETRY" centered overlay until real data arrives */}
-        <div style={{
-          position: "absolute", inset: 0,
-          display: "flex", alignItems: "center", justifyContent: "center",
-          pointerEvents: "none",
-        }}>
-          <span style={{
-            fontSize: 8, letterSpacing: "0.2em",
+        <div>
+          <div style={{
+            fontSize: 8, letterSpacing: "0.18em",
+            color: "rgba(0,255,255,0.75)", textTransform: "uppercase",
+            fontWeight: 700,
+          }}>
+            India crude arrivals
+          </div>
+          <div style={{
+            fontSize: 7, letterSpacing: "0.1em",
             color: "rgba(0,255,255,0.35)", textTransform: "uppercase",
-            background: "rgba(2,4,8,0.55)", padding: "2px 6px", borderRadius: 1,
-          }}>AWAITING TELEMETRY</span>
+            marginTop: 1,
+          }}>
+            est. barrels / day
+          </div>
         </div>
+
+        {/* Big number: 7-day average */}
+        <div style={{ textAlign: "right" }}>
+          <div style={{
+            fontSize: 13, fontWeight: 700, color: "#00ffff",
+            fontFamily: "'Share Tech Mono','Courier New',monospace",
+            lineHeight: 1,
+            textShadow: "0 0 6px rgba(0,255,255,0.4)",
+          }}>
+            {daily ? (
+              daily.avg_barrels_per_day_last_7d > 0
+                ? `${formatCompactBarrels(daily.avg_barrels_per_day_last_7d)}/d`
+                : "0 bbl/d"
+            ) : (
+              "—"
+            )}
+          </div>
+          <div style={{
+            fontSize: 6.5, letterSpacing: "0.1em",
+            color: "rgba(0,255,255,0.4)", textTransform: "uppercase",
+            marginTop: 2,
+          }}>
+            7D AVG
+          </div>
+        </div>
+      </div>
+
+      {/* Chart Canvas */}
+      <div style={{ width: "100%", height: 105, position: "relative" }}>
+        {hasHistory ? (
+          <ResponsiveContainer width="100%" height="100%">
+            <BarChart data={chartData} margin={{ top: 4, right: 4, left: -24, bottom: 0 }}>
+              <CartesianGrid stroke="rgba(0,255,255,0.08)" strokeDasharray="2 3" vertical={false} />
+              <XAxis
+                dataKey="day"
+                stroke="rgba(0,255,255,0.3)"
+                tick={{ fontSize: 7, fill: "rgba(0,255,255,0.5)" }}
+                tickLine={false}
+                axisLine={{ stroke: "rgba(0,255,255,0.2)" }}
+                interval="preserveStartEnd"
+              />
+              <YAxis
+                stroke="rgba(0,255,255,0.3)"
+                tick={{ fontSize: 7, fill: "rgba(0,255,255,0.4)" }}
+                tickLine={false}
+                axisLine={{ stroke: "rgba(0,255,255,0.2)" }}
+                tickFormatter={(v: number) => formatCompactBarrels(v)}
+                width={30}
+              />
+              <Tooltip
+                content={({ active, payload }) => {
+                  if (active && payload && payload.length) {
+                    const data = payload[0].payload as { fullDay: string; barrels: number; tankers: number };
+                    return (
+                      <div style={{
+                        background: "rgba(2,6,12,0.92)",
+                        border: "1px solid rgba(0,255,255,0.4)",
+                        padding: "4px 7px",
+                        fontSize: 9,
+                        fontFamily: "'Share Tech Mono','Courier New',monospace",
+                        color: "#00ffff",
+                        boxShadow: "0 0 8px rgba(0,255,255,0.2)",
+                      }}>
+                        <div style={{ color: "rgba(0,255,255,0.6)", fontSize: 8 }}>{data.fullDay}</div>
+                        <div>{data.barrels.toLocaleString()} bbl</div>
+                        <div style={{ color: "#ff3b30", fontSize: 8 }}>{data.tankers} tankers</div>
+                      </div>
+                    );
+                  }
+                  return null;
+                }}
+              />
+              <Bar
+                dataKey="barrels"
+                fill="#00ffff"
+                opacity={0.85}
+                radius={[1, 1, 0, 0]}
+                isAnimationActive={false}
+              />
+            </BarChart>
+          </ResponsiveContainer>
+        ) : (
+          <div style={{
+            width: "100%", height: "100%",
+            display: "flex", flexDirection: "column",
+            alignItems: "center", justifyContent: "center",
+            border: "1px dashed rgba(0,255,255,0.12)",
+            borderRadius: 2,
+          }}>
+            <span style={{
+              fontSize: 8, letterSpacing: "0.2em",
+              color: "rgba(0,255,255,0.45)", textTransform: "uppercase",
+              background: "rgba(2,4,8,0.55)", padding: "2px 6px", borderRadius: 1,
+            }}>
+              {loading ? "FETCHING TELEMETRY..." : "Collecting data..."}
+            </span>
+            <span style={{
+              fontSize: 7, color: "rgba(0,255,255,0.25)", marginTop: 4,
+            }}>
+              Few days of history recorded
+            </span>
+          </div>
+        )}
       </div>
     </div>
   );
 }
+

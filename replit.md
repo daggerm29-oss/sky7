@@ -26,7 +26,7 @@ pnpm workspace monorepo using TypeScript. Each package manages its own dependenc
 - Flight data: ADS-B via adsb.lol (military + public aviation), 3s refresh interval
 - Aircraft markers: SDF icon-image with heading rotation — same markers work in both 2D and 3D
 - CORS-safe: adsb.lol is proxied via Express API routes (`/api/proxy/adsb/mil`, `/api/proxy/adsb/global`)
-- Maritime intel: ships radar via `ships-faf8.onrender.com` proxied at `/api/proxy/ships` (4s server cache, 5s client poll). MapLibre circle layers (`ships-halo` + `ships-dot`) in `ShipsLayer.tsx` colored by source (AISSTREAM=white, TANKER=red, MILITARY=blue). `MaritimePanel.tsx` floating panel has Filters (3 toggles), Live Metrics, and Regional Analytics with two recharts placeholder line charts (Hormuz Transit Volume, Indian Subcontinent Unloading). Toggled via the maritime button in `MasterToolbar`.
+- Maritime intel: ships radar via `worldview-intel-1.onrender.com` proxied at `/api/proxy/ships` (8s server cache, 5s client poll). MapLibre circle layers (`ships-halo` + `ships-dot`) in `ShipsLayer.tsx` colored by source (AISSTREAM=white, TANKER=red, MILITARY=blue). `MaritimePanel.tsx` floating panel has Filters (3 toggles), Live Metrics, and Regional Analytics with two recharts placeholder line charts (Hormuz Transit Volume, Indian Subcontinent Unloading). Toggled via the maritime button in `MasterToolbar`.
 - Note: MapLibre requires WebGL — works in deployed/real browsers; Replit preview sandbox lacks GPU acceleration
 
 ## Key Commands

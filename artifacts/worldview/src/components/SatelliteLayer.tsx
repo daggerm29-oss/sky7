@@ -203,7 +203,7 @@ function parseTle(text: string, cap: number): SatRecord[] {
 
 function propagate(rec: SatRecord, when: Date): SatPosition | null {
   const pv = satellite.propagate(rec.satrec, when);
-  if (!pv.position || typeof pv.position === "boolean") return null;
+  if (!pv || !pv.position || typeof pv.position === "boolean") return null;
   const gmst = satellite.gstime(when);
   const geo = satellite.eciToGeodetic(pv.position, gmst);
   const lat = satellite.degreesLat(geo.latitude);
@@ -624,20 +624,12 @@ export function SatelliteLayer({
     }
     if (!map.getLayer("satellites-layer")) {
       map.addLayer({
-        id: "satellites-layer", type: "symbol", source: "satellites",
-        layout: {
-          "icon-image": "satellite-icon",
-          "icon-size": ["get", "size"],
-          "icon-allow-overlap": true,
-          "icon-ignore-placement": true,
-          "icon-anchor": "center",
-        },
+        id: "satellites-layer",
+        type: "circle",
+        source: "satellites",
         paint: {
-          "icon-color": ["get", "color"],
-          // Hidden — the canvas overlay handles rendering at correct 3D altitude.
-          // Keep source+layer alive for MapLibre internal bookkeeping only.
-          "icon-opacity": 0,
-          "icon-halo-width": 0,
+          "circle-radius": 0,
+          "circle-opacity": 0,
         },
       });
     }

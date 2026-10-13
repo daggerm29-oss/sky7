@@ -7,19 +7,28 @@ import maplibregl from "maplibre-gl";
 // are kept around so list-rendering UIs can display them later.
 // ──────────────────────────────────────────────────────────────────────────────
 export interface Ship {
-  mmsi: number;
+  mmsi: number | string;
   vessel_name?: string;
+  ship_name?: string;
   lat: number;
   lon: number;
   sog?: number;
   cog?: number;
   last_updated?: number;
-  /** Upstream classification — TANKER / MILITARY / UNKNOWN. */
-  category: "TANKER" | "MILITARY" | "UNKNOWN" | string;
-  /** Upstream feed origin — AISSTREAM (global) / MARINETRAFFIC / FUSED_INTEL. */
-  source: "AISSTREAM" | "MARINETRAFFIC" | "FUSED_INTEL" | string;
+  /** Upstream classification — TANKER / MILITARY / UNKNOWN or custom. */
+  category?: "TANKER" | "MILITARY" | "UNKNOWN" | string;
+  /** Upstream feed origin — AISSTREAM (global) / MARINETRAFFIC / FUSED_INTEL / DARK_FLEET or custom. */
+  source?: "AISSTREAM" | "MARINETRAFFIC" | "FUSED_INTEL" | "DARK_FLEET" | string;
   dwt?: number;
   est_barrels?: number;
+  destination?: string;
+  status?: string;
+  // AIS Gap Candidates / Dark Fleet telemetry (originating strictly from /api/dark-fleet)
+  is_gap?: boolean;
+  time_went_dark?: string;
+  last_known_lat?: number;
+  last_known_lon?: number;
+  [key: string]: unknown;
 }
 
 export interface ShipFilters {
@@ -29,6 +38,8 @@ export interface ShipFilters {
   tankers: boolean;
   /** Show AISSTREAM (global civilian AIS) contacts (rendered white). */
   globalAis: boolean;
+  /** Show AIS GAP CANDIDATES (stopped transmitting for 30+ min, rendered orange). */
+  aisGap: boolean;
 }
 
 interface Props {
@@ -46,46 +57,50 @@ interface Props {
 const C_TANKER  = "#ff3b30"; // red
 const C_MIL     = "#3a8dff"; // blue
 const C_AIS     = "#ffffff"; // white (AISSTREAM, global)
+const C_GAP     = "#ff9500"; // amber/orange (AIS gap candidates)
 const C_FALLBACK = "rgba(180,200,210,0.65)";
 
+export function isAisGapCandidate(s: Ship): boolean {
+  // AIS gap candidates originate strictly from /api/dark-fleet.
+  // We do not infer them from the radar list.
+  return s.is_gap === true || s.source === "DARK_FLEET";
+}
+
 /**
- * Bucket a ship into one of the four render categories. Order matters:
- *   1. AISSTREAM source overrides everything (global civilian feed = white)
- *   2. TANKER category (regional fused intel)
- *   3. MILITARY category (regional fused intel)
- *   4. anything else falls back to a muted neutral colour.
+ * Bucket a ship into one of the render categories.
  */
-function classifyShip(s: Ship): { color: string; bucket: "ais" | "tanker" | "mil" | "other" } {
+function classifyShip(s: Ship): { color: string; bucket: "ais" | "tanker" | "mil" | "gap" | "other" } {
+  if (isAisGapCandidate(s))      return { color: C_GAP,    bucket: "gap"   };
   if (s.source === "AISSTREAM")  return { color: C_AIS,    bucket: "ais"   };
   if (s.category === "TANKER")   return { color: C_TANKER, bucket: "tanker"};
   if (s.category === "MILITARY") return { color: C_MIL,    bucket: "mil"   };
   return { color: C_FALLBACK, bucket: "other" };
 }
 
-/** Build a GeoJSON FeatureCollection from the filtered ship list. Each
- *  feature carries pre-resolved color + bucket as feature properties so the
- *  MapLibre paint expressions stay trivial. */
+/** Build a GeoJSON FeatureCollection from the filtered ship list. */
 function buildGeoJson(ships: Ship[], filters: ShipFilters): GeoJSON.FeatureCollection {
   const features: GeoJSON.Feature[] = [];
   for (const s of ships) {
     if (typeof s.lat !== "number" || typeof s.lon !== "number") continue;
     const { color, bucket } = classifyShip(s);
+    if (bucket === "gap"    && !filters.aisGap)    continue;
     if (bucket === "ais"    && !filters.globalAis) continue;
     if (bucket === "tanker" && !filters.tankers)   continue;
     if (bucket === "mil"    && !filters.military)  continue;
-    // 'other' bucket: hide unless any filter is on (treat as ambient noise).
-    if (bucket === "other" && !(filters.globalAis || filters.tankers || filters.military)) continue;
+    if (bucket === "other"  && !(filters.globalAis || filters.tankers || filters.military || filters.aisGap)) continue;
 
     features.push({
       type: "Feature",
       geometry: { type: "Point", coordinates: [s.lon, s.lat] },
       properties: {
         mmsi: s.mmsi,
-        name: s.vessel_name ?? "",
+        name: s.vessel_name ?? s.ship_name ?? "",
         color,
         bucket,
-        category: s.category,
-        source: s.source,
+        category: s.category ?? "",
+        source: s.source ?? "",
+        status: s.status ?? "",
+        time_went_dark: s.time_went_dark ?? "",
       },
     });
   }
@@ -93,11 +108,7 @@ function buildGeoJson(ships: Ship[], filters: ShipFilters): GeoJSON.FeatureColle
 }
 
 /**
- * Renders maritime radar contacts as MapLibre circle layers. Same architecture
- * as SatelliteLayer but simpler — ships sit at sea level so we don't need any
- * altitude projection or canvas overlay. A halo layer underneath each dot
- * gives the points a subtle glow so military / tanker contacts read clearly
- * over both ocean and land basemap tiles.
+ * Renders maritime radar contacts as MapLibre circle layers.
  */
 export function ShipsLayer({ map, mapLoaded, ships, filters, visible }: Props) {
   // ── source / layer setup (once per map instance) ────────────────────────
@@ -121,6 +132,7 @@ export function ShipsLayer({ map, mapLoaded, ships, filters, visible }: Props) {
             "match", ["get", "bucket"],
             "tanker", 6.5,
             "mil",    6.5,
+            "gap",    5.5,
             "ais",    3.5,
             3.5,
           ],
@@ -141,6 +153,7 @@ export function ShipsLayer({ map, mapLoaded, ships, filters, visible }: Props) {
             "match", ["get", "bucket"],
             "tanker", 3.2,
             "mil",    3.2,
+            "gap",    2.8,
             "ais",    1.6,
             1.6,
           ],
@@ -154,6 +167,7 @@ export function ShipsLayer({ map, mapLoaded, ships, filters, visible }: Props) {
             "match", ["get", "bucket"],
             "tanker", 0.6,
             "mil",    0.6,
+            "gap",    0.6,
             0,
           ],
           "circle-stroke-color": "rgba(0,0,0,0.55)",

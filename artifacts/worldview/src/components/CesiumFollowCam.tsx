@@ -134,8 +134,18 @@ export function CesiumFollowCam({ aircraft, modelUrl }: Props) {
         // adds a grey wash. The Google tileset already has its own haze.
         scene.fog.enabled = false;
 
-        // Cesium's physically-correct sun lighting.
-        scene.light = new Cesium.SunLight();
+        // Directional headlight illuminating the aircraft from the camera angle so
+        // the aircraft model and textures are clearly visible day or night.
+        const updateLight = () => {
+          if (!viewer || viewer.isDestroyed()) return;
+          const cam = viewer.scene.camera;
+          scene.light = new Cesium.DirectionalLight({
+            direction: Cesium.Cartesian3.clone(cam.directionWC),
+            color: Cesium.Color.WHITE,
+            intensity: 2.5,
+          });
+        };
+        updateLight();
 
         // Photorealistic 3D tiles with night-vision shader
         try {
@@ -154,6 +164,7 @@ export function CesiumFollowCam({ aircraft, modelUrl }: Props) {
         const SMOOTH_TAU = 0.45; // seconds — tight enough to feel "live"
         let lastFrameMs = performance.now();
         scene.preRender.addEventListener(() => {
+          updateLight();
           const a = aircraftRef.current;
           const now = performance.now();
           const dt = Math.min((now - lastFrameMs) / 1000, 0.1);
@@ -208,13 +219,12 @@ export function CesiumFollowCam({ aircraft, modelUrl }: Props) {
           orientation: orientationProperty as unknown as Cesium.Property,
           model: {
             uri: modelUrl,
-            minimumPixelSize: 160,
-            maximumScale: 20000,
-            scale: 80.0,
-            // Subtle satellite/night blend — keeps texture but cools it slightly
-            color: Cesium.Color.fromCssColorString("#a8c8e8"),
-            colorBlendMode: Cesium.ColorBlendMode.MIX,
-            colorBlendAmount: 0.18,
+            minimumPixelSize: 96,
+            maximumScale: 500,
+            scale: 2.2,
+            shadows: Cesium.ShadowMode.DISABLED,
+            imageBasedLightingFactor: new Cesium.Cartesian2(1.0, 1.0),
+            color: Cesium.Color.WHITE,
           },
         });
 

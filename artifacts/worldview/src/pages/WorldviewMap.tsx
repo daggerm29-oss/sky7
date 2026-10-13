@@ -1,11 +1,22 @@
 import { useEffect, useRef, useState, useCallback, useMemo } from "react";
 import maplibregl from "maplibre-gl";
+import "../lib/maplibre-patch";
 import { CesiumFollowCam } from "../components/CesiumFollowCam";
 import { SatelliteLayer, type SatPosition } from "../components/SatelliteLayer";
 import { ShipsLayer, type Ship, type ShipFilters } from "../components/ShipsLayer";
 import { FloatingPanel } from "../components/FloatingPanel";
 import { MaritimePanel } from "../components/MaritimePanel";
-import { MasterToolbar, AviationIcon, MaritimeIcon } from "../components/MasterToolbar";
+import { MasterToolbar, AviationIcon, MaritimeIcon, PlaybackIcon } from "../components/MasterToolbar";
+import {
+  PlaybackLayer,
+  type PlaybackMode,
+  type PlaybackShipContact,
+  type PlaybackPlaneContact,
+  type PlaybackRegionBounds,
+  type SelectedEntity as PlaybackSelectedEntity,
+  type TrailPoint as PlaybackTrailPoint,
+} from "../components/PlaybackLayer";
+import { PlaybackPanel, type PlaybackIndexFrame } from "../components/PlaybackPanel";
 
 // Active AO radius (km): satellites within this distance from the theater
 // centroid are flagged as "active overwatch" assets.
@@ -470,14 +481,280 @@ export default function WorldviewMap() {
   // ── MARITIME INTEL ──────────────────────────────────────────────────────
   // Floating panel + ShipsLayer (5s polling). Filters control globe rendering
   // only; metric counts always reflect the unfiltered tick.
-  const [maritimePanelOpen, setMaritimePanelOpen] = useState(false);
+  const [maritimePanelOpen, setMaritimePanelOpen] = useState(true);
   const [ships, setShips] = useState<Ship[]>([]);
   const [shipsLoading, setShipsLoading] = useState(false);
   const [shipsError, setShipsError] = useState<string | null>(null);
   const [shipsLastUpdate, setShipsLastUpdate] = useState<Date | null>(null);
   const [shipFilters, setShipFilters] = useState<ShipFilters>({
-    military: true, tankers: true, globalAis: true,
+    military: true, tankers: true, globalAis: true, aisGap: true,
   });
+
+  // ── PLAYBACK INTEL ──────────────────────────────────────────────────────
+  const [playbackOpen, setPlaybackOpen] = useState(false);
+  const [playbackActive, setPlaybackActive] = useState(false);
+  const [playbackMode, setPlaybackMode] = useState<PlaybackMode>("INDIA");
+  const [playbackConfig, setPlaybackConfig] = useState<any>(null);
+  const [playbackFrames, setPlaybackFrames] = useState<PlaybackIndexFrame[]>([]);
+  const [currentFrameIndex, setCurrentFrameIndex] = useState(0);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [playbackSpeed, setPlaybackSpeed] = useState<1 | 2 | 4>(1);
+  const [playbackLoading, setPlaybackLoading] = useState(false);
+  const [playbackFrameLoading, setPlaybackFrameLoading] = useState(false);
+  const [playbackShips, setPlaybackShips] = useState<PlaybackShipContact[]>([]);
+  const [playbackPlanes, setPlaybackPlanes] = useState<PlaybackPlaneContact[]>([]);
+  const [selectedPlaybackEntity, setSelectedPlaybackEntity] = useState<PlaybackSelectedEntity | null>(null);
+  const [playbackTrailPoints, setPlaybackTrailPoints] = useState<PlaybackTrailPoint[]>([]);
+  const [playbackTrailLoading, setPlaybackTrailLoading] = useState(false);
+
+  const frameCacheRef = useRef<Map<string, any>>(new Map());
+  const abortFrameRef = useRef<AbortController | null>(null);
+  const reqSeqRef = useRef<number>(0);
+
+  // Fetch config once on mount
+  useEffect(() => {
+    fetch("/api/proxy/playback/config")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((cfg) => {
+        if (cfg) setPlaybackConfig(cfg);
+      })
+      .catch(() => {});
+  }, []);
+
+  const regionBounds = useMemo<PlaybackRegionBounds | null>(() => {
+    if (playbackMode === "PLANES") return null;
+    if (playbackConfig?.ship_regions?.[playbackMode]) {
+      return playbackConfig.ship_regions[playbackMode];
+    }
+    if (playbackMode === "INDIA") return { latMin: 5, latMax: 26, lonMin: 66, lonMax: 90 };
+    if (playbackMode === "HORMUZ") return { latMin: 22, latMax: 31, lonMin: 47, lonMax: 62 };
+    return null;
+  }, [playbackMode, playbackConfig]);
+
+  // Load index when playback opens or mode changes
+  const loadPlaybackIndex = useCallback(async (modeToLoad: PlaybackMode) => {
+    setPlaybackLoading(true);
+    setSelectedPlaybackEntity(null);
+    setPlaybackTrailPoints([]);
+    try {
+      const url =
+        modeToLoad === "PLANES"
+          ? "/api/proxy/playback/planes/index?hours=24"
+          : `/api/proxy/playback/ships/${modeToLoad}/index?hours=24`;
+      const res = await fetch(url);
+      if (!res.ok) throw new Error("Index fetch failed");
+      const data = await res.json();
+      const frames: PlaybackIndexFrame[] = Array.isArray(data.frames) ? data.frames : [];
+      setPlaybackFrames(frames);
+
+      // Fly map to the region
+      const map = mapRef.current;
+      if (map) {
+        if (modeToLoad === "INDIA") {
+          map.fitBounds([[66, 5], [90, 26]], { padding: 60, duration: 1500 });
+        } else if (modeToLoad === "HORMUZ") {
+          map.fitBounds([[47, 22], [62, 31]], { padding: 60, duration: 1500 });
+        } else if (modeToLoad === "PLANES") {
+          map.flyTo({ center: [68, 22], zoom: 4.5, duration: 1500 });
+        }
+      }
+
+      if (frames.length > 0) {
+        // Start from newest frame
+        const lastIdx = frames.length - 1;
+        setCurrentFrameIndex(lastIdx);
+      } else {
+        setPlaybackShips([]);
+        setPlaybackPlanes([]);
+      }
+    } catch (err) {
+      console.warn("Failed to load playback index:", err);
+      setPlaybackFrames([]);
+    } finally {
+      setPlaybackLoading(false);
+    }
+  }, []);
+
+  // When playback is activated or mode changes, trigger index load
+  useEffect(() => {
+    if (playbackActive) {
+      loadPlaybackIndex(playbackMode);
+    }
+  }, [playbackActive, playbackMode, loadPlaybackIndex]);
+
+  // Load a single frame (with in-memory cache + stale abort + monotonic sequence)
+  const loadPlaybackFrame = useCallback(
+    async (frameId: number, modeToLoad: PlaybackMode) => {
+      const cacheKey = `${modeToLoad}:${frameId}`;
+      if (frameCacheRef.current.has(cacheKey)) {
+        const cached = frameCacheRef.current.get(cacheKey);
+        if (modeToLoad === "PLANES") {
+          const raw = cached.planes || [];
+          setPlaybackPlanes(
+            raw.map((p: any[]) => ({
+              hex: p[0],
+              lat: p[1],
+              lon: p[2],
+              alt_ft: p[3],
+              gs_kt: p[4],
+              track: p[5],
+              callsign: p[6],
+              mil: p[7],
+            }))
+          );
+          setPlaybackShips([]);
+        } else {
+          const raw = cached.ships || [];
+          setPlaybackShips(
+            raw.map((s: any[]) => ({
+              mmsi: s[0],
+              lat: s[1],
+              lon: s[2],
+              sog: s[3],
+              cog: s[4],
+              cat: s[5],
+            }))
+          );
+          setPlaybackPlanes([]);
+        }
+        return;
+      }
+
+      if (abortFrameRef.current) {
+        abortFrameRef.current.abort();
+      }
+      const abortCtrl = new AbortController();
+      abortFrameRef.current = abortCtrl;
+      const currentSeq = ++reqSeqRef.current;
+
+      setPlaybackFrameLoading(true);
+      try {
+        const url =
+          modeToLoad === "PLANES"
+            ? `/api/proxy/playback/planes/frame/${frameId}`
+            : `/api/proxy/playback/ships/${modeToLoad}/frame/${frameId}`;
+        const res = await fetch(url, { signal: abortCtrl.signal });
+        if (!res.ok) throw new Error("Frame fetch failed");
+        const data = await res.json();
+        frameCacheRef.current.set(cacheKey, data);
+
+        if (currentSeq === reqSeqRef.current) {
+          if (modeToLoad === "PLANES") {
+            const raw = data.planes || [];
+            setPlaybackPlanes(
+              raw.map((p: any[]) => ({
+                hex: p[0],
+                lat: p[1],
+                lon: p[2],
+                alt_ft: p[3],
+                gs_kt: p[4],
+                track: p[5],
+                callsign: p[6],
+                mil: p[7],
+              }))
+            );
+            setPlaybackShips([]);
+          } else {
+            const raw = data.ships || [];
+            setPlaybackShips(
+              raw.map((s: any[]) => ({
+                mmsi: s[0],
+                lat: s[1],
+                lon: s[2],
+                sog: s[3],
+                cog: s[4],
+                cat: s[5],
+              }))
+            );
+            setPlaybackPlanes([]);
+          }
+        }
+      } catch (err: any) {
+        if (err.name !== "AbortError") {
+          console.warn("Failed to load playback frame:", err);
+        }
+      } finally {
+        if (currentSeq === reqSeqRef.current) {
+          setPlaybackFrameLoading(false);
+        }
+      }
+    },
+    []
+  );
+
+  // When currentFrameIndex changes, load the frame
+  useEffect(() => {
+    if (!playbackActive || playbackFrames.length === 0) return;
+    const target = playbackFrames[currentFrameIndex];
+    if (target) {
+      loadPlaybackFrame(target.id, playbackMode);
+    }
+  }, [playbackActive, playbackFrames, currentFrameIndex, playbackMode, loadPlaybackFrame]);
+
+  // Playing loop & Prefetching
+  useEffect(() => {
+    if (!playbackActive || !isPlaying || playbackFrames.length < 2) return;
+
+    // Prefetch next 2 frames lazily
+    for (const offset of [1, 2]) {
+      const nextIdx = (currentFrameIndex + offset) % playbackFrames.length;
+      const nextFrame = playbackFrames[nextIdx];
+      if (nextFrame) {
+        const nextKey = `${playbackMode}:${nextFrame.id}`;
+        if (!frameCacheRef.current.has(nextKey)) {
+          const url =
+            playbackMode === "PLANES"
+              ? `/api/proxy/playback/planes/frame/${nextFrame.id}`
+              : `/api/proxy/playback/ships/${playbackMode}/frame/${nextFrame.id}`;
+          fetch(url)
+            .then((r) => (r.ok ? r.json() : null))
+            .then((d) => {
+              if (d) frameCacheRef.current.set(nextKey, d);
+            })
+            .catch(() => {});
+        }
+      }
+    }
+
+    const intervalMs = playbackSpeed === 4 ? 350 : playbackSpeed === 2 ? 700 : 1400;
+    const timer = setInterval(() => {
+      setCurrentFrameIndex((prev) => (prev + 1 >= playbackFrames.length ? 0 : prev + 1));
+    }, intervalMs);
+
+    return () => clearInterval(timer);
+  }, [playbackActive, isPlaying, playbackFrames, currentFrameIndex, playbackMode, playbackSpeed]);
+
+  // Trail selection
+  const handleSelectPlaybackEntity = useCallback(
+    async (entity: PlaybackSelectedEntity) => {
+      setSelectedPlaybackEntity(entity);
+      setPlaybackTrailLoading(true);
+      try {
+        const url =
+          entity.type === "plane"
+            ? `/api/proxy/playback/planes/trail/${entity.id}?hours=24`
+            : `/api/proxy/playback/ships/${playbackMode}/trail/${entity.id}?hours=24`;
+        const res = await fetch(url);
+        if (res.ok) {
+          const trail = await res.json();
+          setPlaybackTrailPoints(Array.isArray(trail) ? trail : []);
+        }
+      } catch (err) {
+        console.warn("Failed to fetch playback trail:", err);
+      } finally {
+        setPlaybackTrailLoading(false);
+      }
+    },
+    [playbackMode]
+  );
+
+  const exitPlayback = useCallback(() => {
+    setPlaybackActive(false);
+    setPlaybackOpen(false);
+    setIsPlaying(false);
+    setSelectedPlaybackEntity(null);
+    setPlaybackTrailPoints([]);
+  }, []);
   // Multi-select: a Set of NORAD IDs currently flagged for overwatch.
   const [selectedSatIds, setSelectedSatIds] = useState<Set<string>>(new Set());
   // Latest position snapshot keyed by NORAD ID — feeds the overwatch panel
@@ -530,13 +807,13 @@ export default function WorldviewMap() {
             color: a.hex === selectedHex ? selectedColor : color,
             size: a.hex === selectedHex ? 1.3 : 0.75,
             flight: a.flight?.trim() || a.hex,
-            alt_baro: a.alt_baro ?? null,
-            gs: a.gs ?? null,
+            alt_baro: typeof a.alt_baro === "number" ? a.alt_baro : 0,
+            gs: typeof a.gs === "number" ? a.gs : 0,
             t: a.t || "",
             squawk: a.squawk || "",
             r: a.r || "",
-            lat: a.lat,
-            lon: a.lon,
+            lat: a.lat ?? 0,
+            lon: a.lon ?? 0,
           },
         })),
     };
@@ -608,28 +885,11 @@ export default function WorldviewMap() {
     try {
       map = new maplibregl.Map({
         container: mapContainer.current,
-        style: {
-          version: 8,
-          sources: {
-            carto: {
-              type: "raster",
-              tiles: [
-                "https://a.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png",
-                "https://b.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png",
-                "https://c.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png",
-              ],
-              tileSize: 256,
-              attribution: "© CARTO © OpenStreetMap contributors",
-              maxzoom: 19,
-            },
-          },
-          layers: [{ id: "carto-tiles", type: "raster", source: "carto" }],
-          glyphs: "https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf",
-        },
+        style: "https://tiles.openfreemap.org/styles/dark",
         center: [0, 20],
         zoom: 2.5,
         minZoom: 1,
-        maxZoom: 16,
+        maxZoom: 19,
         maxPitch: 85,
         attributionControl: false,
       });
@@ -801,25 +1061,74 @@ export default function WorldviewMap() {
   }, [mode, areaMode, radius, fetchData]);
 
   useEffect(() => {
-    const interval = setInterval(() => fetchData(mode, areaMode, radius), 1000);
+    const interval = setInterval(() => fetchData(mode, areaMode, radius), 5000);
     return () => clearInterval(interval);
   }, [mode, areaMode, radius, fetchData]);
 
-  // ── MARITIME radar polling — 5s ticks against the api-server proxy. We
-  //    poll continuously (not just when the panel is open) so the dots on
-  //    the globe stay live whenever the toolbar is showing maritime active.
+  // ── MARITIME radar & dark-fleet polling — 5s ticks against the api-server proxy.
+  //    Radar ships come from /api/proxy/ships (/api/radar).
+  //    AIS gap candidates come strictly from /api/proxy/dark-fleet (/api/dark-fleet)
+  //    using their last_known_lat and last_known_lon.
   useEffect(() => {
     let cancelled = false;
     const tick = async () => {
       try {
         setShipsLoading(true);
-        const res = await fetch(`${base}/api/proxy/ships`);
-        if (!res.ok) throw new Error(`ships ${res.status}`);
-        const data = (await res.json()) as Ship[];
+        const [shipsRes, darkRes] = await Promise.allSettled([
+          fetch(`${base}/api/proxy/ships`),
+          fetch(`${base}/api/proxy/dark-fleet`),
+        ]);
+
+        let radarShips: Ship[] = [];
+        if (shipsRes.status === "fulfilled" && shipsRes.value.ok) {
+          const data = (await shipsRes.value.json()) as Ship[];
+          if (Array.isArray(data)) radarShips = data;
+        }
+
+        let darkShips: Ship[] = [];
+        if (darkRes.status === "fulfilled" && darkRes.value.ok) {
+          const darkData = await darkRes.value.json();
+          if (Array.isArray(darkData)) {
+            darkShips = darkData
+              .filter((d: { last_known_lat?: unknown; last_known_lon?: unknown }) =>
+                typeof d.last_known_lat === "number" && typeof d.last_known_lon === "number"
+              )
+              .map((d: {
+                mmsi: string | number;
+                ship_name?: string;
+                last_known_lat: number;
+                last_known_lon: number;
+                time_went_dark?: string;
+                last_sog?: number;
+                last_cog?: number;
+              }) => ({
+                mmsi: Number(d.mmsi) || d.mmsi,
+                ship_name: d.ship_name || "UNKNOWN",
+                vessel_name: d.ship_name || "UNKNOWN",
+                lat: d.last_known_lat,
+                lon: d.last_known_lon,
+                last_known_lat: d.last_known_lat,
+                last_known_lon: d.last_known_lon,
+                sog: typeof d.last_sog === "number" ? d.last_sog : undefined,
+                cog: typeof d.last_cog === "number" ? d.last_cog : undefined,
+                source: "DARK_FLEET",
+                category: "UNKNOWN",
+                is_gap: true,
+                time_went_dark: d.time_went_dark,
+              }));
+          }
+        }
+
         if (cancelled) return;
-        setShips(Array.isArray(data) ? data : []);
-        setShipsError(null);
-        setShipsLastUpdate(new Date());
+
+        if (radarShips.length > 0 || darkShips.length > 0) {
+          setShips([...radarShips, ...darkShips]);
+          setShipsError(null);
+          setShipsLastUpdate(new Date());
+        } else if (shipsRes.status === "rejected" || (shipsRes.status === "fulfilled" && !shipsRes.value.ok)) {
+          const reason = shipsRes.status === "rejected" ? shipsRes.reason : `HTTP ${shipsRes.value.status}`;
+          setShipsError(reason instanceof Error ? reason.message : String(reason));
+        }
       } catch (err) {
         if (cancelled) return;
         setShipsError(err instanceof Error ? err.message : "ships fetch failed");
@@ -855,7 +1164,7 @@ export default function WorldviewMap() {
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !mapLoadedState) return;
-    const showFlights = visibility !== "satellites";
+    const showFlights = aviationPanelOpen && visibility !== "satellites" && !playbackActive;
     const showSats = visibility !== "flights";
     const setVis = (id: string, on: boolean) => {
       if (map.getLayer(id)) {
@@ -865,12 +1174,13 @@ export default function WorldviewMap() {
     setVis("aircraft-layer", showFlights);
     ["satellites-layer", "sat-orbit-line", "sat-orbit-glow", "sat-footprint-fill", "sat-footprint-ring", "sat-footprint-spokes", "sat-nadir-line", "sat-nadir-dot"].forEach((id) => setVis(id, showSats && satIntelOn));
     if (!showFlights && trackedHex) setTrackedHex(null);
+    if (!showFlights) setSelectedAircraft(null);
     if (!showSats) {
       setSelectedSatIds(new Set());
       userAddedRef.current = new Set();
       userRemovedRef.current = new Set();
     }
-  }, [visibility, mapLoadedState, satIntelOn, trackedHex]);
+  }, [visibility, mapLoadedState, satIntelOn, trackedHex, aviationPanelOpen, playbackActive]);
 
   // THEATER OF OPERATIONS — debounced Nominatim autocomplete search
   useEffect(() => {
@@ -1241,7 +1551,21 @@ export default function WorldviewMap() {
         mapLoaded={mapLoadedState}
         ships={ships}
         filters={shipFilters}
-        visible={maritimePanelOpen}
+        visible={maritimePanelOpen && !playbackActive}
+      />
+
+      {/* PLAYBACK RADAR & AIRCRAFT — dedicated MapLibre layer */}
+      <PlaybackLayer
+        map={mapRef.current}
+        mapLoaded={mapLoadedState}
+        active={playbackActive}
+        mode={playbackMode}
+        regionBounds={regionBounds}
+        ships={playbackShips}
+        planes={playbackPlanes}
+        selectedEntity={selectedPlaybackEntity}
+        trailPoints={playbackTrailPoints}
+        onSelectEntity={handleSelectPlaybackEntity}
       />
 
       {/* SATELLITE INTEL — propagates TLEs and overlays satellites on the globe */}
@@ -1328,6 +1652,19 @@ export default function WorldviewMap() {
             icon: MaritimeIcon,
             active: maritimePanelOpen,
             onClick: () => setMaritimePanelOpen((o) => !o),
+          },
+          {
+            id: "playback",
+            label: "Tactical Playback (24h)",
+            icon: PlaybackIcon,
+            active: playbackOpen,
+            onClick: () => {
+              setPlaybackOpen((prev) => {
+                const next = !prev;
+                setPlaybackActive(next);
+                return next;
+              });
+            },
           },
         ]}
       />
@@ -1878,6 +2215,35 @@ export default function WorldviewMap() {
         />
       )}
 
+      {/* TACTICAL PLAYBACK — floating controls panel */}
+      {playbackOpen && (
+        <PlaybackPanel
+          active={playbackActive}
+          mode={playbackMode}
+          onModeChange={(nextMode) => {
+            setPlaybackMode(nextMode);
+            setIsPlaying(false);
+          }}
+          frames={playbackFrames}
+          currentFrameIndex={currentFrameIndex}
+          onSeekFrame={(idx) => setCurrentFrameIndex(idx)}
+          isPlaying={isPlaying}
+          onTogglePlay={() => setIsPlaying((p) => !p)}
+          speed={playbackSpeed}
+          onSpeedChange={setPlaybackSpeed}
+          loading={playbackLoading}
+          loadingFrame={playbackFrameLoading}
+          selectedEntity={selectedPlaybackEntity}
+          trailLoading={playbackTrailLoading}
+          onClearTrail={() => {
+            setSelectedPlaybackEntity(null);
+            setPlaybackTrailPoints([]);
+          }}
+          onExitPlayback={exitPlayback}
+          onClose={exitPlayback}
+        />
+      )}
+
       {/* DETACHED CONTACTS PANEL — appears when the user pops contacts out of
           Aviation Intel. Has its own header (drag/minimize/close) plus a custom
           DOCK button. Releasing a drag near the right edge of the Aviation
@@ -1988,7 +2354,7 @@ export default function WorldviewMap() {
       )}
 
       {/* TOP-RIGHT LEGEND / FEED INFO — only in 2D */}
-      {viewMode === "2d" && (
+      {viewMode === "2d" && aviationPanelOpen && (
         <div style={{ position: "absolute", top: 14, right: 14, zIndex: 10, display: "flex", flexDirection: "column", gap: 8, width: 165 }}>
           <div style={{ padding: 10, background: "rgba(2,4,8,0.88)", backdropFilter: "blur(20px)", border: "1px solid rgba(0,255,255,0.14)", borderRadius: 2 }}>
             <div style={{ fontSize: 8, letterSpacing: "0.2em", color: "rgba(0,255,255,0.35)", textTransform: "uppercase", marginBottom: 7 }}>MAP LEGEND</div>
